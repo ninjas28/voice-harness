@@ -73,7 +73,7 @@ mod tests {
             .to_string()
             .contains("config error: missing key"));
 
-        let io_err = HarnessError::Io(std::io::Error::new(std::io::ErrorKind::Other, "disk"));
+        let io_err = HarnessError::Io(std::io::Error::other("disk"));
         let src = std::error::Error::source(&io_err);
         assert!(src.is_some());
         assert!(HarnessError::Upstream {
