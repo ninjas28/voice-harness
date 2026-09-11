@@ -582,7 +582,9 @@ dependencies = [
  "harness-core",
  "reqwest",
  "serde_json",
+ "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

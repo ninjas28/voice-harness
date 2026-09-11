@@ -174,6 +174,16 @@ fn default_system_prompt() -> String {
 pub struct PluginsConfig {
     #[serde(default = "default_enabled_plugins")]
     pub enabled: Vec<String>,
+    /// Host allowlist for the `http_fetch` built-in (deny by default).
+    #[serde(default)]
+    pub http_fetch: HttpFetchConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HttpFetchConfig {
+    /// Hosts `http_fetch` may GET. Empty = deny everything.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
 }
 
 fn default_enabled_plugins() -> Vec<String> {
@@ -222,6 +232,7 @@ impl Default for Config {
             },
             plugins: PluginsConfig {
                 enabled: default_enabled_plugins(),
+                http_fetch: Default::default(),
             },
         }
     }
