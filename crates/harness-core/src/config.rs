@@ -68,6 +68,15 @@ pub struct TtsConfig {
     pub voice: String,
     #[serde(default = "default_tts_response_format")]
     pub response_format: String,
+    /// Sample rate of the upstream's *raw* (non-WAV) PCM output; 16000 means
+    /// raw bodies pass through unchanged. Ignored for WAV responses (the
+    /// header carries the rate).
+    #[serde(default = "default_tts_raw_sample_rate")]
+    pub raw_sample_rate: u32,
+}
+
+fn default_tts_raw_sample_rate() -> u32 {
+    16_000
 }
 
 fn default_tts_base_url() -> String {
@@ -191,6 +200,7 @@ impl Default for Config {
                 model: default_tts_model(),
                 voice: default_tts_voice(),
                 response_format: default_tts_response_format(),
+                raw_sample_rate: default_tts_raw_sample_rate(),
             },
             llm: LlmConfig {
                 base_url: default_llm_base_url(),
