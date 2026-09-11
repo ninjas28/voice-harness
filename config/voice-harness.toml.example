@@ -1,0 +1,42 @@
+# voice-harness example configuration.
+# Copy to config/voice-harness.toml and fill in keys (or set VH_<SECTION>__<KEY> env vars,
+# e.g. VH_STT__API_KEY=... — env wins over file).
+
+[server]
+bind = "127.0.0.1:8090"
+api_keys = []                      # empty = require none (localhost/LAN trust)
+
+[stt]
+base_url = "https://voicebox.zippystation.com"
+api_key = "SET-ME"
+chat_path = "/v1/audio/transcriptions"
+model = "nemotron-asr"
+
+[tts]
+base_url = "https://voicebox.zippystation.com"
+api_key = "SET-ME"
+speech_path = "/v1/audio/speech"
+model = "magpie-tts"
+voice = "default"
+response_format = "wav"
+
+[llm]
+base_url = "https://ai.zippystation.com/api"
+api_key = "SET-ME"
+chat_path = "/api/chat/completions"   # alternates: /v1/chat/completions
+model = "default"
+
+[session]
+silence_ms = 700
+min_utterance_ms = 300
+max_utterance_ms = 30000
+pre_speech_ms = 500
+chunk_max_chars = 200
+max_history_turns = 8
+idle_timeout_secs = 600
+
+[prompts]
+system = "You are a helpful home voice assistant. Answer concisely — 1 to 3 sentences unless the user asks for detail. Speak plainly; never output markdown, code fences, or lists. You can call tools when useful."
+
+[plugins]
+enabled = ["time", "http_fetch"]
