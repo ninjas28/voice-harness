@@ -20,6 +20,9 @@ pub enum HarnessError {
     /// Local I/O failure.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// Network / transport failure talking to an upstream service.
+    #[error("network error: {0}")]
+    Network(String),
 }
 
 impl HarnessError {
