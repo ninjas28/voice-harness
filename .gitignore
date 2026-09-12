@@ -1,3 +1,4 @@
 /target
 /config/voice-harness.toml
 .build/
+/.hermes/
