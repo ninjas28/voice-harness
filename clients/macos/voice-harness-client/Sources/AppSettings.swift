@@ -25,4 +25,20 @@ enum AppSettings {
             UserDefaults.standard.set(trimmed, forKey: serverURLKey)
         }
     }
+
+    // MARK: - TTS playback rate
+
+    static let ttsRateKey = "tts_rate"
+
+    /// Available playback speeds for the panel picker.
+    static let ttsRateChoices: [Float] = [1.0, 1.2, 1.5, 2.0]
+
+    static var ttsRate: Float {
+        let stored = UserDefaults.standard.object(forKey: ttsRateKey) as? Float
+        return stored ?? 1.0
+    }
+
+    static func setTTSRate(_ value: Float) {
+        UserDefaults.standard.set(value, forKey: ttsRateKey)
+    }
 }

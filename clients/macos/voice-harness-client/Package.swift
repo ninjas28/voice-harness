@@ -10,17 +10,7 @@ let package = Package(
             name: "VoiceHarnessClient",
             dependencies: ["voicekit"],
             path: "Sources",
-            exclude: ["voicekit", "vhdiag", "vhws"]
-        ),
-        .executableTarget(
-            name: "vhdiag",
-            dependencies: ["voicekit"],
-            path: "Sources/vhdiag"
-        ),
-        .executableTarget(
-            name: "vhws",
-            dependencies: ["voicekit"],
-            path: "Sources/vhws"
+            exclude: ["voicekit"]
         ),
         .testTarget(name: "voicekitTests", dependencies: ["voicekit"])
     ]

@@ -114,13 +114,7 @@ public final class HarnessClient: @unchecked Sendable {
     }
 
     public func sendAudio(base64: String) async {
-        VHSendLog.log("sendAudio \(base64.count) chars")
-        do {
-            try await transport.send(ClientMessage.audioData(pcm: base64).encode())
-            VHSendLog.log("sendAudio ok")
-        } catch {
-            VHSendLog.log("sendAudio ERROR: \(error)")
-        }
+        try? await transport.send(ClientMessage.audioData(pcm: base64).encode())
     }
 
     public func sendSpeechEnd() async {
@@ -130,28 +124,5 @@ public final class HarnessClient: @unchecked Sendable {
     public func stop() async {
         try? await transport.send(ClientMessage.sessionStop.encode())
         await transport.close()
-    }
-}
-
-/// File-based send-path tracing (VH_DEBUG_SEND=1): unified logging redacts
-/// dynamic values, so attempts/results go to /tmp/vh-send.log instead.
-public enum VHSendLog {
-    static let path = "/tmp/vh-send.log"
-    public static var enabled: Bool {
-        ProcessInfo.processInfo.environment["VH_DEBUG_SEND"] == "1"
-    }
-    public static func log(_ line: String) {
-        guard enabled else { return }
-        let data = Data((line + "\n").utf8)
-        if let fh = FileHandle(forWritingAtPath: path) {
-            defer { try? fh.close() }
-            fh.seekToEndOfFile()
-            fh.write(data)
-        } else {
-            try? data.write(to: URL(fileURLWithPath: path))
-        }
-    }
-    public static func reset() {
-        try? FileManager.default.removeItem(atPath: path)
     }
 }

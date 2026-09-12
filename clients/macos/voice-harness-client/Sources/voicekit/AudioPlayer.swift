@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import Foundation
 
 /// Streams `audio.chunk` payloads through a 16 kHz `AVAudioPlayerNode`.
@@ -7,19 +8,32 @@ import Foundation
 /// callback only forwards the count onto it. Drain accounting is exercised by
 /// unit tests via `schedulePCMForTest`/`drainForTest` (no audio hardware);
 /// actual sound is verified live in T9.
-public final class AudioPlayer: @unchecked Sendable {
-    private let engine = AVAudioEngine()
+public final class AudioPlayer: ObservableObject, @unchecked Sendable {
+    /// Exposed so the mic capture can share this engine: two AVAudioEngines on
+    /// a Bluetooth device fight over the route and playback goes silent.
+    public let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
-    private let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000,
-                                       channels: 1, interleaved: true)!
+    /// Pitch-preserving playback speed (1.0 = normal; up to 2.0 for skimming).
+    private let timePitch = AVAudioUnitTimePitch()
+    private let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000,
+                                       channels: 1, interleaved: false)!
     private let queue = DispatchQueue(label: "vh.play")
     private var scheduled = 0
     private var drainContinuation: CheckedContinuation<Void, Never>?
     private(set) var isDrained = true
 
+    /// TTS playback speed, published for the SwiftUI picker. Applied to the
+    /// time-pitch unit live — mid-playback changes are immediate.
+    @Published public var rate: Float = 1.0 {
+        didSet { timePitch.rate = rate }
+    }
+
     public init() {
         engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: format)
+        engine.attach(timePitch)
+        // node → timePitch → mixer so rate changes apply to everything queued.
+        engine.connect(node, to: timePitch, format: format)
+        engine.connect(timePitch, to: engine.mainMixerNode, format: format)
     }
 
     public func start() throws {
@@ -31,6 +45,9 @@ public final class AudioPlayer: @unchecked Sendable {
     public func stop() {
         queue.sync {
             node.stop()
+            // Shared-engine mode: the player owns the engine — stop it here so
+            // the Bluetooth route is released when the session ends.
+            if engine.isRunning { engine.stop() }
             scheduled = 0
             setDrainedLocked(true)
         }
@@ -82,14 +99,14 @@ public final class AudioPlayer: @unchecked Sendable {
         continuation.resume()
     }
 
+    /// Int16 wire samples → Float32 canonical buffer (effect units like
+    /// AVAudioUnitTimePitch reject Int16 connections with -10868).
     private func makeBuffer(_ samples: [Int16]) -> AVAudioPCMBuffer? {
-        let buffer = samples.withUnsafeBufferPointer { p in
-            AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(p.count))
-        }
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))
         guard let buffer else { return nil }
         buffer.frameLength = AVAudioFrameCount(samples.count)
-        samples.withUnsafeBufferPointer { p in
-            buffer.int16ChannelData!.pointee.update(from: p.baseAddress!, count: samples.count)
+        if let dst = buffer.floatChannelData?[0] {
+            for (i, s) in samples.enumerated() { dst[i] = Float(s) / 32768.0 }
         }
         return buffer
     }

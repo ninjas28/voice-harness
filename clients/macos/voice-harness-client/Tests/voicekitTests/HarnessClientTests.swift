@@ -102,4 +102,49 @@ final class HarnessClientTests: XCTestCase {
         XCTAssertEqual(sent.dropFirst(2).first, #"{"type":"speech.end"}"#)
         XCTAssertEqual(sent.last, #"{"type":"session.stop"}"#)
     }
+
+    /// Regression: the server emits state:listening immediately after
+    /// turn.completed — it cannot know when the client finishes playing the
+    /// queued audio. While audio is pending, the client must OWN the
+    /// speaking→listening transition (the drain watcher does it), or the UI
+    /// flips back to listening mid-playback and kills the response early.
+    func testStateListeningIgnoredWhileAudioPending() async throws {
+        let (client, stub, model) = makeClient()
+        try await client.start(deviceId: nil)
+        await stub.simulateIncoming(#"{"type":"audio.chunk","pcm":"QUJD","seq":0}"#)
+        XCTAssertEqual(model.phase, .speaking)
+        XCTAssertTrue(model.audioPending)
+        // Server-side turn bookkeeping arrives while audio still queued:
+        await stub.simulateIncoming(#"{"type":"turn.completed"}"#)
+        XCTAssertEqual(model.phase, .speaking, "turn.completed absorbed while audio pending")
+        await stub.simulateIncoming(#"{"type":"state","state":"listening"}"#)
+        XCTAssertEqual(model.phase, .speaking, "state:listening must NOT override pending audio")
+        await stub.simulateIncoming(#"{"type":"state","state":"thinking"}"#)
+        XCTAssertEqual(model.phase, .speaking, "state:thinking must NOT override pending audio either")
+        // Server VAD hears the client's own TTS through the mic (no AEC) and
+        // emits state:speech — that's self-echo, not the user interrupting.
+        await stub.simulateIncoming(#"{"type":"state","state":"speech"}"#)
+        XCTAssertEqual(model.phase, .speaking, "state:speech must NOT override pending audio (self-echo)")
+        // While pending, the client owns the phase entirely.
+        await stub.simulateIncoming(#"{"type":"state","state":"listening"}"#)
+        XCTAssertEqual(model.phase, .speaking)
+        // Client finishes playback → drain watcher calls audioDidFinish:
+        model.audioDidFinish()
+        model.apply(.turnCompleted)
+        XCTAssertEqual(model.phase, .listening, "drain watcher completes the transition after playback")
+        await client.stop()
+    }
+
+    /// Regression: mic and playback MUST share one AVAudioEngine. Two engines
+    /// on a Bluetooth headset fight over the audio route (A2DP vs HFP) and the
+    /// playback engine's route is invalidated — buffers "complete" without a
+    /// sound. One engine negotiates the route once for both directions.
+    func testMicSharesPlayerEngine() {
+        let player = AudioPlayer()
+        let mic = MicCapture(engine: player.engine)
+        XCTAssertTrue(mic.engine === player.engine)
+        // Default init still creates its own engine.
+        let standalone = MicCapture()
+        XCTAssertFalse(standalone.engine === player.engine)
+    }
 }

@@ -15,6 +15,13 @@ final class AppRuntime: ObservableObject {
     @Published private(set) var transcript: String?
     @Published private(set) var responseText = ""
     @Published private(set) var errorMessage: String?
+    /// TTS playback speed — persisted; applied to the live player too.
+    @Published var playbackRate: Float = AppSettings.ttsRate {
+        didSet {
+            AppSettings.setTTSRate(playbackRate)
+            player?.rate = playbackRate
+        }
+    }
     let serverURL = AppSettings.serverURL
 
     /// The wire→UI state machine; single source of truth, mirrored above.
@@ -27,10 +34,6 @@ final class AppRuntime: ObservableObject {
     /// Set when `turn.completed` arrived while audio was still pending.
     private var turnCompletedPending = false
     private var cancellables = Set<AnyCancellable>()
-    /// VH_DEBUG_MIC=1 → periodic mic chunk-rate/peak logging (os_log "vhdebug").
-    private let debugMic = ProcessInfo.processInfo.environment["VH_DEBUG_MIC"] == "1"
-    private var debugChunks = 0
-    private var debugPeak: Int16 = 0
 
     private init() {
         // @Published projections emit *after* mutation — safe to mirror here.
@@ -52,22 +55,19 @@ final class AppRuntime: ObservableObject {
         defer { isBusy = false }
         errorMessage = nil
         model.reset()
-        if debugMic { DebugMicStats.reset() }
 
+        // Order matters on macOS: the input tap must be installed and the
+        // engine prepared BEFORE engine.start() — tapping a running engine's
+        // input node silently never fires. So: create player + client, install
+        // mic tap on the shared engine (prepared, not started), then one
+        // engine start negotiates the Bluetooth route for both directions.
         let player = AudioPlayer()
-        do {
-            try player.start()
-        } catch {
-            errorMessage = "Audio output unavailable: \(error.localizedDescription)"
-            return
-        }
-
+        player.rate = playbackRate
         let transport = URLSessionTransport(url: serverURL)
         let client = HarnessClient(transport: transport, model: model)
         do {
             try await client.start(deviceId: deviceName())
         } catch {
-            await transport.close()
             errorMessage = "Can't reach harness server at \(serverURL.host ?? "?"): \(error.localizedDescription)"
             return
         }
@@ -82,26 +82,24 @@ final class AppRuntime: ObservableObject {
             Task { @MainActor in self?.noteTurnCompleted() }
         }
 
-        let mic = MicCapture()
+        let mic = MicCapture(engine: player.engine)
         do {
-            try mic.start { [weak client, weak self] event in
+            try mic.start { [weak client] event in
                 guard case .chunk16k(let base64) = event, let client else { return }
-                if let self, self.debugMic {
-                    let samples = base64ToPCM16(base64)
-                    var peak: Int16 = 0
-                    for v in samples { if abs(Int32(v)) > abs(Int32(peak)) { peak = v } }
-                    self.debugMicChunk(peak: peak, samples: samples.count)
-                }
                 Task { await client.sendAudio(base64: base64) }
             }
         } catch {
             await client.stop()
-            player.stop()
             errorMessage = "Microphone unavailable: \(error.localizedDescription)"
             return
         }
-        if debugMic {
-            NSLog("vhdebug: mic native format: \(mic.nativeFormatDescription)")
+        do {
+            try player.start()
+        } catch {
+            await client.stop()
+            mic.stop()
+            errorMessage = "Audio output unavailable: \(error.localizedDescription)"
+            return
         }
 
         self.player = player
@@ -114,7 +112,6 @@ final class AppRuntime: ObservableObject {
 
     func stop() {
         guard running else { return }
-        if debugMic { DebugMicStats.shared.summary() }
         drainTask?.cancel()
         drainTask = nil
         mic?.stop()
@@ -153,55 +150,4 @@ final class AppRuntime: ObservableObject {
     private func deviceName() -> String {
         Host.current().localizedName ?? ProcessInfo.processInfo.hostName
     }
-
-    /// Debug-mic accounting: logs a summary every 20 chunks (~1.2 s at 16 kHz).
-    /// Called from the audio tap queue — counters are main-actor-published via
-    /// the mirroring in init, so accumulate in local storage instead.
-    nonisolated private func debugMicChunk(peak: Int16, samples: Int) {
-        DebugMicStats.shared(peak: peak, samples: samples)
-    }
-}
-
-/// Lock-protected accumulator for VH_DEBUG_MIC logging (audio-thread safe).
-/// File-based: unified logging redacts dynamic values, so peaks go to
-/// /tmp/vh-mic-debug.log instead.
-final class DebugMicStats: @unchecked Sendable {
-    static let shared = DebugMicStats()
-    private let lock = NSLock()
-    private var chunks = 0
-    private var maxPeak: Int16 = 0
-    private let logPath = "/tmp/vh-mic-debug.log"
-
-    static func reset() {
-        try? FileManager.default.removeItem(atPath: "/tmp/vh-mic-debug.log")
-    }
-
-    private func append(_ line: String) {
-        let data = Data((line + "\n").utf8)
-        if let fh = FileHandle(forWritingAtPath: logPath) {
-            defer { try? fh.close() }
-            fh.seekToEndOfFile()
-            fh.write(data)
-        } else {
-            try? data.write(to: URL(fileURLWithPath: logPath))
-        }
-    }
-
-    private func record(peak: Int16, samples: Int) {
-        lock.lock()
-        chunks += 1
-        if abs(Int32(peak)) > abs(Int32(maxPeak)) { maxPeak = peak }
-        let c = chunks
-        lock.unlock()
-        append("chunk \(c) peak=\(peak) samples=\(samples)")
-    }
-
-    func summary() {
-        lock.lock()
-        let c = chunks, mp = maxPeak
-        lock.unlock()
-        append("SUMMARY chunks=\(c) maxpeak=\(mp)")
-    }
-
-    func callAsFunction(peak: Int16, samples: Int) { record(peak: peak, samples: samples) }
 }

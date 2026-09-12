@@ -1,11 +1,11 @@
 import AVFoundation
 import Foundation
 
-/// Captures microphone audio via `AVAudioEngine` and forwards 16 kHz mono
-/// PCM16 chunks (base64) to a sink — the harness wire contract.
+/// Captures microphone audio via an `AVAudioEngine` tap and forwards 16 kHz
+/// mono PCM16 chunks (base64) to a sink — the harness wire contract.
 ///
-/// All mutable state is confined to `queue`. The tap callback converts using a
-/// converter captured at tap-install time (touched solely on the audio
+/// All mutable state is confined to `queue`. The tap callback converts using
+/// a converter captured at tap-install time (touched solely on the audio
 /// callback thread) and hands only a `String` across the queue boundary.
 /// Verified live in T9 — no mic in the test host.
 public final class MicCapture: @unchecked Sendable {
@@ -17,14 +17,23 @@ public final class MicCapture: @unchecked Sendable {
         case unsupportedInputFormat(AVAudioFormat)
     }
 
-    private let engine = AVAudioEngine()
+    /// The engine (shared with AudioPlayer in the app, standalone in tests).
+    public let engine: AVAudioEngine
+
+    /// Shares the given engine when provided (the app always passes the
+    /// player's engine — one engine owns the Bluetooth route for both
+    /// directions); default init creates a standalone engine for tests.
+    public init(engine: AVAudioEngine? = nil) {
+        self.engine = engine ?? AVAudioEngine()
+        self.sharesEngine = engine != nil
+    }
+
     private let queue = DispatchQueue(label: "vh.mic")
+    /// Shared-engine mode: this engine belongs to the AudioPlayer and the
+    /// player calls start/stop on it.
+    private var sharesEngine = false
     private var sink: (@Sendable (Event) -> Void)?
     private var running = false
-    /// Description of the input node's native format (set during `start`).
-    public private(set) var nativeFormatDescription = "not started"
-
-    public init() {}
 
     public var isRunning: Bool { queue.sync { running } }
 
@@ -38,7 +47,6 @@ public final class MicCapture: @unchecked Sendable {
             guard let converter = AVAudioConverter(from: native, to: target) else {
                 throw CaptureError.unsupportedInputFormat(native)
             }
-            nativeFormatDescription = native.description
             self.sink = sink
             input.installTap(onBus: 0, bufferSize: 4800, format: native) { [weak self, converter] buffer, _ in
                 guard let self else { return }
@@ -47,8 +55,14 @@ public final class MicCapture: @unchecked Sendable {
                 let payload = pcm16ToBase64(samples)
                 self.queue.async { self.emit(payload) }
             }
-            engine.prepare()
-            try engine.start()
+            if sharesEngine {
+                // Tap is up; the shared engine is started by the AudioPlayer so
+                // a single engine start negotiates the Bluetooth route once.
+                engine.prepare()
+            } else {
+                engine.prepare()
+                try engine.start()
+            }
             running = true
         }
     }
@@ -57,14 +71,15 @@ public final class MicCapture: @unchecked Sendable {
         queue.sync {
             guard running else { return }
             engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+            if !sharesEngine {
+                engine.stop()
+            }
             sink = nil
             running = false
         }
     }
 
     private func emit(_ base64: String) {
-        VHSendLog.log("emit \(base64.count) chars, sink=\(sink != nil)")
         sink?(.chunk16k(base64: base64))
     }
 

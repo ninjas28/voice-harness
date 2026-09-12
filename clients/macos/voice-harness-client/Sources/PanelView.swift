@@ -16,6 +16,13 @@ struct PanelView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(runtime.isBusy)
             }
+            Picker("Speed", selection: $runtime.playbackRate) {
+                ForEach(AppSettings.ttsRateChoices, id: \.self) { rate in
+                    Text(String(format: "%.1f×", rate)).tag(rate)
+                }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
             if let err = runtime.errorMessage {
                 Text(err).foregroundStyle(.red).font(.caption)
             }
@@ -45,6 +52,10 @@ struct PanelView: View {
             }
         }
         .padding(14)
+        // MenuBarExtra(.window) freezes the panel at its first-measured height;
+        // fixedSize(vertical) lets the window grow/shrink with the content so
+        // long transcripts are never truncated.
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var displayText: String {

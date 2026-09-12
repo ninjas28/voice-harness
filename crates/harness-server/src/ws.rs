@@ -132,10 +132,6 @@ struct ConnState {
     session_id: Option<String>,
     /// In-flight turn task; aborted by session.stop / new session.start.
     turn: Option<tokio::task::JoinHandle<()>>,
-    /// Debug accounting (VH_DEBUG_WIRE=1): received-frame count and max |sample|.
-    debug_wire: bool,
-    wire_frames: u64,
-    wire_peak: u16,
 }
 
 impl ConnState {
@@ -151,9 +147,6 @@ impl ConnState {
             assembler: None,
             session_id: None,
             turn: None,
-            debug_wire: std::env::var("VH_DEBUG_WIRE").as_deref() == Ok("1"),
-            wire_frames: 0,
-            wire_peak: 0,
         }
     }
 
@@ -208,23 +201,6 @@ impl ConnState {
                         .await;
                     return false;
                 };
-                // Debug accounting of what actually arrives over the wire
-                // (VH_DEBUG_WIRE=1): count frames and track the max |sample|.
-                if self.debug_wire {
-                    let frame_peak = samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
-                    self.wire_frames += 1;
-                    if frame_peak > self.wire_peak {
-                        self.wire_peak = frame_peak;
-                    }
-                    if self.wire_frames.is_multiple_of(20) {
-                        tracing::info!(
-                            "wire: frames={} peak={} samples={}",
-                            self.wire_frames,
-                            self.wire_peak,
-                            samples.len()
-                        );
-                    }
-                }
                 // Borrow dance: feed_audio needs &mut self and &mut assembler.
                 let mut assembler = self.assembler.take().unwrap();
                 let result = self.feed_audio(&mut assembler, &samples).await;

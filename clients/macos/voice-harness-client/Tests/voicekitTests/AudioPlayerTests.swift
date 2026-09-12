@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 @testable import voicekit
 
@@ -47,5 +48,19 @@ final class AudioPlayerTests: XCTestCase {
             group.cancelAll()
             XCTAssertTrue(drained, "waitUntilDrained did not resume")
         }
+    }
+
+    func testPlaybackRateIsSettableAndPublishable() {
+        let player = AudioPlayer()
+        var observed: [Float] = []
+        let sub = player.$rate.dropFirst().sink { observed.append($0) }
+        _ = sub
+        XCTAssertEqual(player.rate, 1.0, "default rate")
+        player.rate = 1.5
+        XCTAssertEqual(player.rate, 1.5)
+        XCTAssertEqual(observed.last, 1.5, "rate publishes for SwiftUI")
+        // No crash/throw at the AVAudioUnitTimePitch layer even before start().
+        player.rate = 2.0
+        XCTAssertEqual(player.rate, 2.0)
     }
 }
