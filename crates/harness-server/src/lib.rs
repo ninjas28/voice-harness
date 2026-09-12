@@ -3,3 +3,4 @@
 pub mod http;
 pub mod orchestrator;
 pub mod state;
+pub mod ws;

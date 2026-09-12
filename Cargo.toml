@@ -44,3 +44,4 @@ webrtc-vad = "0.4"
 
 # dev / test
 wiremock = "0.6"
+tokio-tungstenite = "0.24"

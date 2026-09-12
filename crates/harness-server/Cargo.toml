@@ -24,6 +24,7 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
+tokio-tungstenite = { workspace = true }
 
 [features]
 default = []

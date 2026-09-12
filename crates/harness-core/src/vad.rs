@@ -155,6 +155,13 @@ impl<D: VadDetector> UtteranceAssembler<D> {
         }
     }
 
+    /// Whether an utterance is currently open (VAD said speech and no
+    /// endpoint has fired yet) — used by the WS layer to emit `State(Speech)`
+    /// exactly once on the Listening → Speech transition.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
     /// Finalize at the max-duration cap (fires even mid-speech). The cap is
     /// measured on speech content, so the emitted utterance is the speech plus
     /// its pre-speech lead-in.
@@ -221,3 +228,14 @@ impl VadDetector for WebrtcVad {
 // The C VAD handle is only ever used behind `&mut self` (exclusive access), so
 // moving it between threads is sound; needed to hold the assembler in tokio tasks.
 unsafe impl Send for WebrtcVad {}
+// Same argument for `&T` shared access: the vad crate's own `Sync` impl is
+// missing (raw `*mut` inside), but the C library's entry points only mutate
+// through `&mut` wrappers. `ConnState` (which owns an assembler) must be
+// `Send` for tokio::spawn — `Sync` on the detector keeps async fns taking
+// `&ConnState` Send-safe. No shared access actually happens: the assembler is
+// always behind `&mut` or moved.
+//
+// SAFETY: webrtc_vad's Fvad functions take `*mut Fvad`; all access from Rust
+// goes through `Vad::is_voice_segment(&mut self)`. Exclusive access only ⇒
+// sharing &Self across threads never mutates concurrently through aliasing.
+unsafe impl Sync for WebrtcVad {}

@@ -213,8 +213,9 @@ impl IntoResponse for ApiError {
 }
 
 /// Auth middleware: when `server.api_keys` is non-empty, require
-/// `Authorization: Bearer <key>` or `X-API-Key: <key>`; otherwise pass
-/// (localhost/LAN trust model). Applies to every route including `/healthz`.
+/// `Authorization: Bearer <key>`, `X-API-Key: <key>`, or `?token=<key>` in the
+/// query string (browsers cannot set headers on WebSocket handshakes);
+/// otherwise pass (localhost/LAN trust model). Applies to every route.
 async fn require_api_key(
     State(config): State<Arc<Config>>,
     headers: HeaderMap,
@@ -234,20 +235,39 @@ async fn require_api_key(
                 .get("x-api-key")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned)
-        });
+        })
+        .or_else(|| query_token(req.uri().query()));
     match provided {
         Some(key) if config.server.api_keys.contains(&key) => Ok(next.run(req).await),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
 }
 
-/// Build the application router (also the unit under test).
+/// Extract `token=<value>` from a raw query string (first occurrence wins).
+fn query_token(query: Option<&str>) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        pair.strip_prefix("token=")
+            .map(|v| v.split('&').next().unwrap_or("").to_string())
+    })
+}
+
+/// Build the application router (also the unit under test). Serves
+/// `POST /v1/turn`, `GET /v1/realtime` (WS upgrade), and `GET /healthz`,
+/// all behind the auth middleware.
 pub fn build_router(deps: RouterDeps) -> Router {
     let auth_config = Arc::new(deps.config.clone());
-    Router::new()
+    let ws_state = crate::ws::WsState::from_router_deps(&deps);
+    // The two routes use different state types (RouterDeps vs WsState), so
+    // each sub-router is built with its own state and merged; the auth +
+    // trace layers wrap the merged result and apply to both.
+    let api = Router::new()
         .route("/v1/turn", post(turn_handler))
         .route("/healthz", get(|| async { "ok" }))
+        .with_state(deps);
+    let ws = Router::new()
+        .route("/v1/realtime", get(crate::ws::realtime_handler))
+        .with_state(ws_state);
+    api.merge(ws)
         .layer(middleware::from_fn_with_state(auth_config, require_api_key))
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .with_state(deps)
 }
