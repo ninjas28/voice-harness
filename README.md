@@ -1,114 +1,113 @@
 # voice-harness
 
-Rust voice-assistant bridge: sits between clients (ESP32-class smart speakers, desktop apps)
-and the existing voice servers (Nemotron ASR + magpie TTS on voicebox, Open WebUI LLM on ai).
-Accepts streamed PCM16 mic audio or pre-transcribed text, runs an agentic pipeline
-(system prompt + plugin tools -> LLM), returns transcript + sentence-chunked TTS audio.
+A Rust daemon that bridges audio clients — ESP32-class smart speakers, the
+bundled macOS menu-bar client — to self-hosted voice services:
 
-## Layout
-
-- `crates/harness-core` — config, wire protocol types, VAD/utterance FSM, chunker
-- `crates/harness-providers` — STT / TTS / LLM upstream clients
-- `crates/harness-plugins` — plugin trait, registry, built-in plugins
-- `crates/harness-server` — axum app: `POST /v1/turn`, `WS /v1/realtime`, loopback example
-- `config/voice-harness.toml.example` — config template (real config is gitignored)
-
-## Quickstart
-
-### 1. Build
-
-```sh
-cargo build --release -p harness-server
+```
+mic audio ──▶ harness ──▶ STT (nemo-speech.cpp @ voicebox.zippystation.com)
+                 │
+                 ├─▶ LLM (Open WebUI @ ai.zippystation.com/api, model glm53)
+                 │      └─ custom system prompt + MCP-style tool plugins
+                 │
+                 └─▶ TTS (voicebox) ──▶ sentence-chunked audio back to client
 ```
 
-### 2. Configure
+- **Server-side VAD** with utterance endpointing: clients just stream mic
+  frames; the harness decides when an utterance ends and a turn begins.
+- **Two surfaces**: `POST /v1/turn` (JSON: pre-transcribed text or base64 audio
+  in, transcript + response + WAV audio out) and `WS /v1/realtime`
+  (streaming audio in, streaming text + audio chunks out).
+- **Plugin/tool-call loop**: MCP-style plugins answer LLM tool calls (a `time`
+  tool ships by default).
+- **macOS menu-bar client** (`clients/macos/voice-harness-client`): live
+  transcript, phase indicator (listening/speech/thinking/speaking), and
+  pitch-preserving TTS speed control.
+
+## Building
+
+Requires Rust (stable, edition 2024).
 
 ```sh
+cargo build --release
 cp config/voice-harness.toml.example config/voice-harness.toml
-# fill in the three SET-ME api keys, or export them instead:
-#   VH_STT__API_KEY=... VH_TTS__API_KEY=... VH_LLM__API_KEY=...
+$EDITOR config/voice-harness.toml   # fill in API keys + endpoints
+./target/release/harness-server config/voice-harness.toml
+curl http://127.0.0.1:8090/healthz  # → ok
 ```
 
-`Config::load` reads `config/voice-harness.toml` by default (a path may be passed as
-the first CLI argument). Env vars use the `VH_<SECTION>__<KEY>` form and win over
-the file.
-
-### 3. Run
+The macOS client:
 
 ```sh
-cargo run -p harness-server
-# → voice-harness listening on http://127.0.0.1:8090
-curl http://127.0.0.1:8090/healthz   # → ok
+cd clients/macos/voice-harness-client
+swift build
+.build/debug/VoiceHarnessClient
 ```
 
-### 4. Try a turn over HTTP
+## Configuration
 
-Text turn:
+`config/voice-harness.toml` (see `voice-harness.toml.example`):
 
-```sh
-curl -s http://127.0.0.1:8090/v1/turn \
-  -H 'content-type: application/json' \
-  -d '{"text": "what time is it", "device_id": "kitchen"}'
-# → {"transcript":"what time is it","response_text":"...","audio_wav_base64":"...","audio_seq":2}
-```
+- `[server]` — bind address, `api_keys` (clients must present one as a bearer
+  token), `sample_rate` (16 kHz)
+- `[stt]` / `[tts]` — voicebox base URL + API key
+- `[llm]` — Open WebUI `base_url` **plus** `chat_path`
+  (`base_url = "https://ai.zippystation.com/api"`,
+  `chat_path = "/v1/chat/completions"` — the two are concatenated; don't
+  double-prefix), `model`, `system_prompt`
 
-Or post a WAV directly (16 kHz mono PCM16 recommended; other rates are resampled):
+## Wire protocol (`/v1/realtime`)
 
-```sh
-curl -s http://127.0.0.1:8090/v1/turn \
-  -H 'content-type: audio/wav' \
-  --data-binary @test.wav
-```
+JSON text frames with dotted `type` tags; audio is base64 PCM16, 16 kHz mono.
 
-### 5. Try the realtime WebSocket
-
-```sh
-cargo run -p harness-server --example loopback -- \
-  --ws ws://127.0.0.1:8090/v1/realtime --file test.wav
-```
-
-The loopback example loads any WAV, resamples to 16 kHz, streams it as ~30 ms
-PCM16 frames over a websocket, and prints every server message. Audio playback
-is out of scope; point an ESP32-class client at the same endpoint for the real thing.
-
-## Auth
-
-If `server.api_keys` is non-empty, every request (HTTP and the WS handshake) must
-present a key via `Authorization: Bearer <key>`, `X-API-Key: <key>`, or — for
-websocket clients that cannot set headers — `?token=<key>` in the URL.
-Empty `api_keys` (the default) means no auth: intended for localhost/LAN trust.
-
-## Wire protocol (WS `/v1/realtime`)
-
-JSON text frames, one object per frame. Client → server:
-
-| type | fields | meaning |
+| Direction | Type | Payload |
 |---|---|---|
-| `session.start` | `device_id?`, `sample_rate?` | open a session (aborts any in-flight turn) |
-| `audio.data` | `pcm` (base64 PCM16, any length) | feed the VAD; server segments utterances |
-| `speech.end` | — | force the current utterance to end now |
-| `session.stop` | — | close the session (server disconnects) |
+| C→S | `session.start` | `device_id?`, `sample_rate?` (default 16000) |
+| C→S | `audio.data` | `pcm` (base64 PCM16); arbitrary framing is fine |
+| C→S | `speech.end` | optional; server-side VAD also endpointed |
+| C→S | `session.stop` | ends the session |
+| S→C | `state` | `listening` / `speech` / `thinking` / `speaking` |
+| S→C | `transcript` | STT result for the utterance |
+| S→C | `response.text.delta` | streamed LLM text |
+| S→C | `audio.chunk` | `pcm` + `seq` (from 0), one TTS sentence per chunk |
+| S→C | `turn.completed` | turn finished server-side |
+| S→C | `error` | `code` + `message` |
 
-Server → client:
+`POST /v1/turn` accepts `{"text": "..."}` or `{"audio_base64": "..."}`
+(WAV/PCM16) and returns transcript, response text, and full audio in one JSON
+body. All endpoints require `Authorization: Bearer <api_key>`.
 
-| type | fields | meaning |
-|---|---|---|
-| `state` | `state` | `listening` → `speech` → `thinking` → `speaking` → `listening` |
-| `transcript` | `text` | utterance transcribed |
-| `response.text.delta` | `text` | streamed LLM tokens |
-| `response.text` | `text` | full reply text |
-| `audio.chunk` | `pcm` (base64), `seq` | sentence-chunked TTS audio, `seq` starts at 0 |
-| `turn.completed` | — | the turn is finished |
-| `error` | `code`, `message` | protocol or pipeline failure; connection stays open |
+## Tests
 
-Endpointing is server-side VAD (WebRTC VAD, aggressive) with the `[session]`
-policy: `silence_ms` of trailing silence ends an utterance, `min_utterance_ms`
-drops blips, `max_utterance_ms` caps duration, `pre_speech_ms` of audio is
-included from the ring buffer. `session.start` / `session.stop` abort an
-in-flight turn — the v1 interruption story.
+```sh
+cargo test --workspace          # Rust (wiremock-only; never hits real servers)
+cargo clippy --workspace --all-targets -- -D warnings
+cd clients/macos/voice-harness-client && swift test
+```
+
+Manual end-to-end check (needs a running server + keys):
+
+```sh
+cargo run --release --example loopback -- \
+  --ws ws://127.0.0.1:8090/v1/realtime --file /path/to/speech.wav
+```
+
+## Client notes (macOS)
+
+- The panel is a `MenuBarExtra` window; settings persist in the
+  `com.zippystation.voice-harness-client` defaults domain (`server_url`,
+  `tts_rate`).
+- Mic and playback share one `AVAudioEngine` — required for Bluetooth headsets
+  (two engines fight over the route and playback goes silent).
+- Deploy as an app bundle under `/Applications` and launch with `open`
+  (launchd-owned); bare background launches get reaped.
 
 ## Status
 
-Phase A complete: workspace scaffold, config loading, wire protocol types,
-VAD/utterance FSM, orchestrator (text + audio turns), HTTP turn API with auth,
-realtime WebSocket sessions with server-side VAD, loopback client example.
+- Harness: complete — 90 Rust tests green (fmt + clippy clean), verified
+  end-to-end against the real STT/TTS/LLM servers (text turn, audio turn, WS
+  streaming with server-side VAD).
+- macOS client: complete — 20 Swift tests green; live-verified: mic streaming,
+  server VAD turns, streamed TTS playback with adjustable speed, phase
+  tracking owned by the client during playback.
+- Deferred (by design): mic-paused-while-speaking (no barge-in without AEC),
+  systemd unit for server deployment, push-to-talk.
