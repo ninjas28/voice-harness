@@ -610,7 +610,10 @@ dependencies = [
 name = "harness-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
+ "base64",
+ "bytes",
  "futures",
  "harness-core",
  "harness-plugins",
@@ -618,6 +621,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -1870,6 +1875,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
 dependencies = [
  "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
  "tokio",
 ]
 

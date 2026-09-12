@@ -9,9 +9,14 @@ harness-core = { path = "../harness-core" }
 harness-providers = { path = "../harness-providers" }
 harness-plugins = { path = "../harness-plugins" }
 tokio = { workspace = true }
+tokio-stream = "0.1"
 axum = { workspace = true }
+tower = { workspace = true }
 tower-http = { workspace = true }
 futures = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -19,3 +24,9 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
+
+[features]
+default = []
+# Bundled example config for `cargo run -p harness-server --example loopback`
+# without a config file present.
+example-config = []
