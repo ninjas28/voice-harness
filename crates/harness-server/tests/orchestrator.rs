@@ -10,7 +10,7 @@ use harness_plugins::{Plugin, PluginManifest, PluginRegistry};
 use harness_providers::llm::{ChatRequest, ChatStream, LlmEvent, LlmProvider};
 use harness_providers::stt::SttProvider;
 use harness_providers::tts::TtsProvider;
-use harness_server::orchestrator::{run_text_turn, Deps};
+use harness_server::orchestrator::{run_audio_utterance, run_text_turn, Deps};
 use harness_server::state::{Session, SessionStore};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
@@ -480,4 +480,107 @@ async fn session_store_isolates_sessions() {
         Arc::ptr_eq(&store.get("dev-a").await, &a),
         "same id → same session"
     );
+}
+
+// ------------------------------------------------------- audio utterance path
+
+/// STT mock whose transcript is set after construction (shared handle).
+struct SettableStt {
+    text: std::sync::Mutex<String>,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl SttProvider for SettableStt {
+    async fn transcribe(
+        &self,
+        _pcm16k: &[i16],
+    ) -> Result<String, harness_core::error::HarnessError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.text.lock().unwrap().clone())
+    }
+}
+
+#[tokio::test]
+async fn audio_utterance_transcribes_then_runs_pipeline() {
+    let stt = Arc::new(SettableStt {
+        text: std::sync::Mutex::new("what time is it".into()),
+        calls: AtomicUsize::new(0),
+    });
+    let tts = Arc::new(MockTts::new());
+    let llm = Arc::new(MockLlm::new(two_sentence_script()));
+    let deps = Deps {
+        config: Config::default(),
+        llm,
+        tts,
+        stt: stt.clone(),
+        plugins: Arc::new(PluginRegistry::new()),
+    };
+
+    let (tx, rx) = mpsc::channel(64);
+    let mut session = Session::default();
+    run_audio_utterance(&deps, &mut session, &[1i16; 480], tx)
+        .await
+        .expect("audio turn completes");
+
+    let events = collect_events_all(rx).await;
+    // Transcript precedes the deltas.
+    assert_eq!(
+        short_names(&events),
+        vec![
+            "transcript",
+            "delta",
+            "audio",
+            "delta",
+            "audio",
+            "response_text",
+            "turn_completed"
+        ],
+        "audio path event order: {events:?}"
+    );
+    match &events[0] {
+        ServerMsg::Transcript { text } => assert_eq!(text, "what time is it"),
+        other => panic!("expected Transcript first, got {other:?}"),
+    }
+    assert_eq!(stt.calls.load(Ordering::SeqCst), 1, "STT called once");
+}
+
+#[tokio::test]
+async fn audio_utterance_empty_transcript_skips_llm() {
+    let stt = Arc::new(SettableStt {
+        text: std::sync::Mutex::new(String::new()),
+        calls: AtomicUsize::new(0),
+    });
+    let llm = Arc::new(MockLlm::new(two_sentence_script()));
+    let deps = Deps {
+        config: Config::default(),
+        llm: llm.clone(),
+        tts: Arc::new(MockTts::new()),
+        stt: stt.clone(),
+        plugins: Arc::new(PluginRegistry::new()),
+    };
+
+    let (tx, rx) = mpsc::channel(64);
+    let mut session = Session::default();
+    run_audio_utterance(&deps, &mut session, &[1i16; 480], tx)
+        .await
+        .expect("empty-audio turn completes");
+
+    let events = collect_events_all(rx).await;
+    assert_eq!(
+        short_names(&events),
+        vec!["transcript", "turn_completed"],
+        "empty transcript: no LLM round: {events:?}"
+    );
+    match &events[0] {
+        ServerMsg::Transcript { text } => assert_eq!(text, ""),
+        other => panic!("expected Transcript, got {other:?}"),
+    }
+    assert_eq!(
+        llm.requests().len(),
+        0,
+        "LLM must not be called on empty transcript"
+    );
+    // Nothing entered history either.
+    assert!(session.history.is_empty());
 }

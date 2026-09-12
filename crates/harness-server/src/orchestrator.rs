@@ -196,11 +196,11 @@ fn messages_for_round(history: &[ChatMessage], extra: &[ChatMessage]) -> Vec<Cha
     messages
 }
 
-/// Run a full text turn: prompt → (streamed LLM → TTS chunks, bounded tool
-/// rounds) → `ResponseText` + `TurnCompleted`. On success the user message,
-/// the assistant reply (and any tool traffic) are appended to
-/// `session.history`, which is then trimmed to `max_history_turns` user turns.
-pub async fn run_text_turn(
+/// Core turn execution shared by the text and audio paths: prompt → streamed
+/// LLM rounds (sentence-chunked TTS) → `ResponseText`, then history update.
+/// Does NOT emit `TurnCompleted` — each public entry point sends it exactly
+/// once, after the pipeline finishes (or skips the pipeline entirely).
+async fn execute_turn(
     deps: &Deps,
     session: &mut crate::state::Session,
     user_text: &str,
@@ -247,11 +247,48 @@ pub async fn run_text_turn(
             text: final_text.clone(),
         })
         .await;
-    let _ = events.send(ServerMsg::TurnCompleted).await;
 
     session
         .history
         .push_back(ChatMessage::text("assistant", &final_text));
     crate::state::trim_history(&mut session.history, deps.config.session.max_history_turns);
+    Ok(())
+}
+
+/// Run a full text turn: prompt → (streamed LLM → TTS chunks, bounded tool
+/// rounds) → `ResponseText` + `TurnCompleted`.
+pub async fn run_text_turn(
+    deps: &Deps,
+    session: &mut crate::state::Session,
+    user_text: &str,
+    events: mpsc::Sender<ServerMsg>,
+) -> Result<(), HarnessError> {
+    execute_turn(deps, session, user_text, events.clone()).await?;
+    let _ = events.send(ServerMsg::TurnCompleted).await;
+    Ok(())
+}
+
+/// Audio ingest path: transcribe the utterance, emit `Transcript`, then run
+/// the same turn pipeline as [`run_text_turn`]. An empty transcript (silent
+/// audio / STT found nothing) skips the LLM entirely: `Transcript{text:""}` +
+/// `TurnCompleted`, nothing enters history.
+pub async fn run_audio_utterance(
+    deps: &Deps,
+    session: &mut crate::state::Session,
+    pcm16k: &[i16],
+    events: mpsc::Sender<ServerMsg>,
+) -> Result<(), HarnessError> {
+    let text = deps.stt.transcribe(pcm16k).await?;
+    let _ = events
+        .send(ServerMsg::Transcript { text: text.clone() })
+        .await;
+
+    if text.trim().is_empty() {
+        let _ = events.send(ServerMsg::TurnCompleted).await;
+        return Ok(());
+    }
+
+    execute_turn(deps, session, &text, events.clone()).await?;
+    let _ = events.send(ServerMsg::TurnCompleted).await;
     Ok(())
 }
