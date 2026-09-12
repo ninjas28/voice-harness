@@ -254,7 +254,14 @@ impl Config {
             .add_source(config::File::from_str(&json, config::FileFormat::Json));
 
         if let Some(p) = path {
-            builder = builder.add_source(config::File::from(p).required(false));
+            // Force TOML: the example file ends in `.toml.example`, whose real
+            // extension would not infer a format (and `required(false)` would
+            // silently skip the file).
+            builder = builder.add_source(
+                config::File::from(p)
+                    .required(false)
+                    .format(config::FileFormat::Toml),
+            );
         }
 
         builder = builder.add_source(
@@ -285,5 +292,32 @@ impl Config {
         } else {
             Err(missing)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The checked-in example config must always parse against the real
+    /// `Config` struct — guards the template against field drift.
+    #[test]
+    fn example_config_file_parses() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/voice-harness.toml.example"
+        ));
+        let cfg = Config::load(Some(path)).expect("example config parses");
+        eprintln!(
+            "DEBUG bind={} stt_key={:?} tts_key={:?} llm_key={:?} raw_rate={}",
+            cfg.server.bind,
+            cfg.stt.api_key,
+            cfg.tts.api_key,
+            cfg.llm.api_key,
+            cfg.tts.raw_sample_rate
+        );
+        assert_eq!(cfg.server.bind, "127.0.0.1:8090");
+        assert_eq!(cfg.tts.raw_sample_rate, 16_000);
+        assert!(cfg.validate().is_ok(), "example has SET-ME keys filled");
     }
 }

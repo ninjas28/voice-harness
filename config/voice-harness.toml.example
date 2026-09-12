@@ -19,6 +19,7 @@ speech_path = "/v1/audio/speech"
 model = "magpie-tts"
 voice = "default"
 response_format = "wav"
+raw_sample_rate = 16000             # sample rate of upstream *raw* PCM (ignored for WAV responses)
 
 [llm]
 base_url = "https://ai.zippystation.com/api"
