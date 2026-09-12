@@ -27,6 +27,10 @@ final class AppRuntime: ObservableObject {
     /// Set when `turn.completed` arrived while audio was still pending.
     private var turnCompletedPending = false
     private var cancellables = Set<AnyCancellable>()
+    /// VH_DEBUG_MIC=1 → periodic mic chunk-rate/peak logging (os_log "vhdebug").
+    private let debugMic = ProcessInfo.processInfo.environment["VH_DEBUG_MIC"] == "1"
+    private var debugChunks = 0
+    private var debugPeak: Int16 = 0
 
     private init() {
         // @Published projections emit *after* mutation — safe to mirror here.
@@ -48,6 +52,7 @@ final class AppRuntime: ObservableObject {
         defer { isBusy = false }
         errorMessage = nil
         model.reset()
+        if debugMic { DebugMicStats.reset() }
 
         let player = AudioPlayer()
         do {
@@ -59,6 +64,13 @@ final class AppRuntime: ObservableObject {
 
         let transport = URLSessionTransport(url: serverURL)
         let client = HarnessClient(transport: transport, model: model)
+        do {
+            try await client.start(deviceId: deviceName())
+        } catch {
+            await transport.close()
+            errorMessage = "Can't reach harness server at \(serverURL.host ?? "?"): \(error.localizedDescription)"
+            return
+        }
         client.onChunk = { [weak player] base64, _ in
             player?.scheduleChunk(base64: base64)
         }
@@ -69,12 +81,17 @@ final class AppRuntime: ObservableObject {
             guard case .turnCompleted = message else { return }
             Task { @MainActor in self?.noteTurnCompleted() }
         }
-        await client.start(deviceId: deviceName())
 
         let mic = MicCapture()
         do {
-            try mic.start { [weak client] event in
+            try mic.start { [weak client, weak self] event in
                 guard case .chunk16k(let base64) = event, let client else { return }
+                if let self, self.debugMic {
+                    let samples = base64ToPCM16(base64)
+                    var peak: Int16 = 0
+                    for v in samples { if abs(Int32(v)) > abs(Int32(peak)) { peak = v } }
+                    self.debugMicChunk(peak: peak, samples: samples.count)
+                }
                 Task { await client.sendAudio(base64: base64) }
             }
         } catch {
@@ -82,6 +99,9 @@ final class AppRuntime: ObservableObject {
             player.stop()
             errorMessage = "Microphone unavailable: \(error.localizedDescription)"
             return
+        }
+        if debugMic {
+            NSLog("vhdebug: mic native format: \(mic.nativeFormatDescription)")
         }
 
         self.player = player
@@ -94,6 +114,7 @@ final class AppRuntime: ObservableObject {
 
     func stop() {
         guard running else { return }
+        if debugMic { DebugMicStats.shared.summary() }
         drainTask?.cancel()
         drainTask = nil
         mic?.stop()
@@ -132,4 +153,55 @@ final class AppRuntime: ObservableObject {
     private func deviceName() -> String {
         Host.current().localizedName ?? ProcessInfo.processInfo.hostName
     }
+
+    /// Debug-mic accounting: logs a summary every 20 chunks (~1.2 s at 16 kHz).
+    /// Called from the audio tap queue — counters are main-actor-published via
+    /// the mirroring in init, so accumulate in local storage instead.
+    nonisolated private func debugMicChunk(peak: Int16, samples: Int) {
+        DebugMicStats.shared(peak: peak, samples: samples)
+    }
+}
+
+/// Lock-protected accumulator for VH_DEBUG_MIC logging (audio-thread safe).
+/// File-based: unified logging redacts dynamic values, so peaks go to
+/// /tmp/vh-mic-debug.log instead.
+final class DebugMicStats: @unchecked Sendable {
+    static let shared = DebugMicStats()
+    private let lock = NSLock()
+    private var chunks = 0
+    private var maxPeak: Int16 = 0
+    private let logPath = "/tmp/vh-mic-debug.log"
+
+    static func reset() {
+        try? FileManager.default.removeItem(atPath: "/tmp/vh-mic-debug.log")
+    }
+
+    private func append(_ line: String) {
+        let data = Data((line + "\n").utf8)
+        if let fh = FileHandle(forWritingAtPath: logPath) {
+            defer { try? fh.close() }
+            fh.seekToEndOfFile()
+            fh.write(data)
+        } else {
+            try? data.write(to: URL(fileURLWithPath: logPath))
+        }
+    }
+
+    private func record(peak: Int16, samples: Int) {
+        lock.lock()
+        chunks += 1
+        if abs(Int32(peak)) > abs(Int32(maxPeak)) { maxPeak = peak }
+        let c = chunks
+        lock.unlock()
+        append("chunk \(c) peak=\(peak) samples=\(samples)")
+    }
+
+    func summary() {
+        lock.lock()
+        let c = chunks, mp = maxPeak
+        lock.unlock()
+        append("SUMMARY chunks=\(c) maxpeak=\(mp)")
+    }
+
+    func callAsFunction(peak: Int16, samples: Int) { record(peak: peak, samples: samples) }
 }

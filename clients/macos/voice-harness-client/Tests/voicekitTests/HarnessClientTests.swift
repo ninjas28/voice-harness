@@ -34,9 +34,21 @@ final class HarnessClientTests: XCTestCase {
         return (client, stub, model)
     }
 
+    func testSendFailsFastWhenServerUnreachable() async {
+        // Regression: URLSessionWebSocketTask.send() suspends forever if the
+        // task was never resumed — the transport must connect eagerly.
+        let transport = URLSessionTransport(url: URL(string: "ws://127.0.0.1:9/v1/realtime")!)
+        let sent = expectation(description: "send completed (success or throw)")
+        Task {
+            _ = try? await transport.send("ping")
+            sent.fulfill()
+        }
+        await fulfillment(of: [sent], timeout: 5.0)
+    }
+
     func testStartSendsSessionStart() async throws {
         let (client, stub, _) = makeClient()
-        await client.start(deviceId: "test")
+        try await client.start(deviceId: "test")
         let sent = await stub.sent
         XCTAssertEqual(sent.first,
                        #"{"type":"session.start","device_id":"test","sample_rate":16000}"#)
@@ -48,7 +60,7 @@ final class HarnessClientTests: XCTestCase {
 
     func testIncomingFramesAreMappedOntoModel() async throws {
         let (client, stub, model) = makeClient()
-        await client.start(deviceId: nil)
+        try await client.start(deviceId: nil)
         await stub.simulateIncoming(#"{"type":"transcript","text":"hi"}"#)
         await stub.simulateIncoming(#"{"type":"state","state":"thinking"}"#)
         await stub.simulateIncoming(#"{"type":"response.text.delta","text":"He"}"#)
@@ -68,7 +80,7 @@ final class HarnessClientTests: XCTestCase {
             }
         }
         let box = ChunkBox()
-        await client.start(deviceId: nil)
+        try await client.start(deviceId: nil)
         client.onChunk = { base64, seq in box.append(base64, seq) }
         await stub.simulateIncoming(#"{"type":"audio.chunk","pcm":"QUJD","seq":3}"#)
         let collected = box.lock.withLock { box.chunks }
@@ -81,7 +93,7 @@ final class HarnessClientTests: XCTestCase {
 
     func testSendersEmitClientFrames() async throws {
         let (client, stub, _) = makeClient()
-        await client.start(deviceId: nil)
+        try await client.start(deviceId: nil)
         await client.sendAudio(base64: "QUJD")
         await client.sendSpeechEnd()
         await client.stop()

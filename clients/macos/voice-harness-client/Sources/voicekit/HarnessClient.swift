@@ -27,6 +27,8 @@ public actor URLSessionTransport: Transport {
 
     public init(url: URL) {
         task = URLSession.shared.webSocketTask(with: url)
+        // Connect eagerly: a send() on a never-resumed task suspends forever.
+        task.resume()
     }
 
     public func setReceiveHandler(_ handler: (@Sendable (String) async -> Void)?) {
@@ -94,7 +96,9 @@ public final class HarnessClient: @unchecked Sendable {
         self.model = model
     }
 
-    public func start(deviceId: String?) async {
+    /// Connects and sends `session.start`. Throws if the server is
+    /// unreachable — the caller should surface that, not hang.
+    public func start(deviceId: String?) async throws {
         let model = self.model
         await transport.setReceiveHandler { [weak self, weak model] text in
             guard let model, let message = try? ServerMessage.decode(text) else { return }
@@ -106,11 +110,17 @@ public final class HarnessClient: @unchecked Sendable {
                 self?.onMessage?(message)
             }
         }
-        try? await transport.send(ClientMessage.sessionStart(deviceId: deviceId, sampleRate: 16000).encode())
+        try await transport.send(ClientMessage.sessionStart(deviceId: deviceId, sampleRate: 16000).encode())
     }
 
     public func sendAudio(base64: String) async {
-        try? await transport.send(ClientMessage.audioData(pcm: base64).encode())
+        VHSendLog.log("sendAudio \(base64.count) chars")
+        do {
+            try await transport.send(ClientMessage.audioData(pcm: base64).encode())
+            VHSendLog.log("sendAudio ok")
+        } catch {
+            VHSendLog.log("sendAudio ERROR: \(error)")
+        }
     }
 
     public func sendSpeechEnd() async {
@@ -120,5 +130,28 @@ public final class HarnessClient: @unchecked Sendable {
     public func stop() async {
         try? await transport.send(ClientMessage.sessionStop.encode())
         await transport.close()
+    }
+}
+
+/// File-based send-path tracing (VH_DEBUG_SEND=1): unified logging redacts
+/// dynamic values, so attempts/results go to /tmp/vh-send.log instead.
+public enum VHSendLog {
+    static let path = "/tmp/vh-send.log"
+    public static var enabled: Bool {
+        ProcessInfo.processInfo.environment["VH_DEBUG_SEND"] == "1"
+    }
+    public static func log(_ line: String) {
+        guard enabled else { return }
+        let data = Data((line + "\n").utf8)
+        if let fh = FileHandle(forWritingAtPath: path) {
+            defer { try? fh.close() }
+            fh.seekToEndOfFile()
+            fh.write(data)
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+    public static func reset() {
+        try? FileManager.default.removeItem(atPath: path)
     }
 }

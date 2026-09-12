@@ -21,6 +21,8 @@ public final class MicCapture: @unchecked Sendable {
     private let queue = DispatchQueue(label: "vh.mic")
     private var sink: (@Sendable (Event) -> Void)?
     private var running = false
+    /// Description of the input node's native format (set during `start`).
+    public private(set) var nativeFormatDescription = "not started"
 
     public init() {}
 
@@ -36,6 +38,7 @@ public final class MicCapture: @unchecked Sendable {
             guard let converter = AVAudioConverter(from: native, to: target) else {
                 throw CaptureError.unsupportedInputFormat(native)
             }
+            nativeFormatDescription = native.description
             self.sink = sink
             input.installTap(onBus: 0, bufferSize: 4800, format: native) { [weak self, converter] buffer, _ in
                 guard let self else { return }
@@ -61,6 +64,7 @@ public final class MicCapture: @unchecked Sendable {
     }
 
     private func emit(_ base64: String) {
+        VHSendLog.log("emit \(base64.count) chars, sink=\(sink != nil)")
         sink?(.chunk16k(base64: base64))
     }
 
