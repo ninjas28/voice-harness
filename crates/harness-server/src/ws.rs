@@ -132,9 +132,16 @@ struct ConnState {
     session_id: Option<String>,
     /// In-flight turn task; aborted by session.stop / new session.start.
     turn: Option<tokio::task::JoinHandle<()>>,
+    /// Debug accounting (VH_DEBUG_WIRE=1): received-frame count and max |sample|.
+    debug_wire: bool,
+    wire_frames: u64,
+    wire_peak: u16,
 }
 
 impl ConnState {
+    /// VAD sub-frame size: 30 ms @ 16 kHz — the largest frame WebRTC VAD
+    /// accepts. Client chunks are split into pieces of at most this size.
+    const VAD_FRAME_SAMPLES: usize = 480;
     fn new(session: &WsState, out: mpsc::Sender<ServerMsg>) -> Self {
         Self {
             config: session.config.clone(),
@@ -144,6 +151,9 @@ impl ConnState {
             assembler: None,
             session_id: None,
             turn: None,
+            debug_wire: std::env::var("VH_DEBUG_WIRE").as_deref() == Ok("1"),
+            wire_frames: 0,
+            wire_peak: 0,
         }
     }
 
@@ -198,12 +208,29 @@ impl ConnState {
                         .await;
                     return false;
                 };
+                // Debug accounting of what actually arrives over the wire
+                // (VH_DEBUG_WIRE=1): count frames and track the max |sample|.
+                if self.debug_wire {
+                    let frame_peak = samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+                    self.wire_frames += 1;
+                    if frame_peak > self.wire_peak {
+                        self.wire_peak = frame_peak;
+                    }
+                    if self.wire_frames.is_multiple_of(20) {
+                        tracing::info!(
+                            "wire: frames={} peak={} samples={}",
+                            self.wire_frames,
+                            self.wire_peak,
+                            samples.len()
+                        );
+                    }
+                }
                 // Borrow dance: feed_audio needs &mut self and &mut assembler.
                 let mut assembler = self.assembler.take().unwrap();
                 let result = self.feed_audio(&mut assembler, &samples).await;
                 self.assembler = Some(assembler);
-                if result.finalized {
-                    self.spawn_turn(result.utt.unwrap());
+                for utt in result.utterances {
+                    self.spawn_turn(utt);
                 }
             }
             ClientMsg::SpeechEnd => {
@@ -224,28 +251,29 @@ impl ConnState {
         false
     }
 
-    /// Feed one frame through the assembler; emit State transitions. Returns
-    /// whether an utterance finalized (in `FeedResult.utt`).
+    /// Feed one chunk through the assembler; emit State transitions. Client
+    /// chunks arrive at arbitrary sizes (the macOS tap emits ~300 ms batches,
+    /// an ESP32 may send 20 ms or 500 ms), but WebRTC VAD only accepts
+    /// 10/20/30 ms frames — so every chunk is split into ≤30 ms sub-frames
+    /// before the assembler. All utterances finalized within the chunk are
+    /// returned (a 480 ms chunk can close one utterance and open another).
     async fn feed_audio(
         &mut self,
         assembler: &mut UtteranceAssembler<WebrtcVad>,
         samples: &[i16],
     ) -> FeedResult {
         let was_active = assembler.is_active();
-        if let Some(utt) = assembler.push(samples, 0) {
-            self.send_state(SessionState::Listening).await;
-            return FeedResult {
-                finalized: true,
-                utt: Some(utt),
-            };
+        let mut utterances = Vec::new();
+        for sub in samples.chunks(Self::VAD_FRAME_SAMPLES) {
+            if let Some(utt) = assembler.push(sub, 0) {
+                self.send_state(SessionState::Listening).await;
+                utterances.push(utt);
+            }
         }
         if !was_active && assembler.is_active() {
             self.send_state(SessionState::Speech).await;
         }
-        FeedResult {
-            finalized: false,
-            utt: None,
-        }
+        FeedResult { utterances }
     }
 
     /// Start the turn pipeline on an abortable task. The task owns the
@@ -312,10 +340,11 @@ impl ConnState {
     }
 }
 
-/// Outcome of feeding one audio frame.
+/// Outcome of feeding one audio chunk: all utterances finalized within it
+/// (can be more than one for chunks longer than an utterance's max length,
+/// and zero when no endpoint fired).
 struct FeedResult {
-    finalized: bool,
-    utt: Option<Utterance>,
+    utterances: Vec<Utterance>,
 }
 
 fn samples_from_le_bytes(bytes: &[u8]) -> Option<Vec<i16>> {

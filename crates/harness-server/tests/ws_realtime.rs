@@ -394,6 +394,54 @@ async fn malformed_json_yields_error_and_connection_stays_open() {
 }
 
 #[tokio::test]
+async fn oversized_client_chunks_are_split_for_vad() {
+    // Regression: the macOS client sends ~300 ms (4832-sample) audio chunks.
+    // WebRTC VAD only accepts 10/20/30 ms frames and reports silence for any
+    // other size — so the server MUST split incoming chunks into ≤30 ms
+    // sub-frames before feeding the assembler, or no utterance ever opens.
+    let (url, _config) = spawn_server_with_keys(Vec::new()).await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start", "device_id": "macos-client" }).to_string(),
+    )
+    .await;
+
+    // ~1.2 s of speech as 8 chunks of 4832 samples (302 ms each), the exact
+    // shape the macOS client produces from its AVAudioEngine tap.
+    for _ in 0..8 {
+        let big: Vec<i16> = (0..16).flat_map(|_| speech_frame()).collect();
+        assert_eq!(big.len(), 7680); // 16 × 480 = 480 ms — yes, even bigger
+        send_text(&mut ws, audio_msg(&big)).await;
+    }
+    // ~1 s of trailing silence, also chunky.
+    for _ in 0..4 {
+        let silence: Vec<i16> = vec![0i16; 7680];
+        send_text(&mut ws, audio_msg(&silence)).await;
+    }
+
+    // The turn must complete exactly as with well-formed 30 ms frames.
+    let mut saw_transcript = false;
+    loop {
+        let v = recv_json(&mut ws).await;
+        match type_of(&v) {
+            "transcript" => {
+                saw_transcript = true;
+                assert_eq!(v["text"], "what time is it");
+            }
+            "turn.completed" => break,
+            "error" => panic!("unexpected error frame: {v}"),
+            _ => {}
+        }
+    }
+    assert!(
+        saw_transcript,
+        "server splits oversized chunks; VAD still fires"
+    );
+}
+
+#[tokio::test]
 async fn auth_required_when_keys_configured() {
     let (url, _config) = spawn_server_with_keys(vec!["secret".into()]).await;
 
