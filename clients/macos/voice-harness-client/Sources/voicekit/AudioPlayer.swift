@@ -68,7 +68,7 @@ public final class AudioPlayer: @unchecked Sendable {
         node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             guard let self else { return }
             self.queue.async {
-                self.scheduled -= 1
+                self.scheduled = max(0, self.scheduled - 1)
                 if self.scheduled == 0 { self.setDrainedLocked(true) }
             }
         }

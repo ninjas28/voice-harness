@@ -84,6 +84,10 @@ public final class HarnessClient: @unchecked Sendable {
     private let model: HarnessSessionModel
     /// Called for each `audio.chunk` (base64 PCM16, seq).
     public var onChunk: (@Sendable (String, Int) -> Void)?
+    /// Called for every decoded server message *after* it was applied to the
+    /// model (on the main actor). Lets the runtime observe frames the model
+    /// absorbs silently (e.g. `turn.completed` while audio is pending).
+    public var onMessage: (@Sendable (ServerMessage) -> Void)?
 
     public init(transport: any Transport, model: HarnessSessionModel) {
         self.transport = transport
@@ -99,6 +103,7 @@ public final class HarnessClient: @unchecked Sendable {
                 if case .audioChunk(let pcm, let seq) = message {
                     self?.onChunk?(pcm, seq)
                 }
+                self?.onMessage?(message)
             }
         }
         try? await transport.send(ClientMessage.sessionStart(deviceId: deviceId, sampleRate: 16000).encode())
