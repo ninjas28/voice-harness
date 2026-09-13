@@ -3,7 +3,8 @@
 use harness_core::config::{
     HttpFetchConfig, McpConfig, PluginsConfig, WeatherConfig, WebSearchConfig,
 };
-use harness_plugins::{registry_from_config, PluginRegistry};
+use harness_plugins::builtin::web_search::WebSearchPlugin;
+use harness_plugins::{registry_from_config, Plugin, PluginRegistry};
 use serde_json::{json, Value};
 
 /// Counts warm() calls — verifies warm_all reaches every plugin.
@@ -351,4 +352,188 @@ async fn weather_round_trip_through_registry_with_test_endpoints() {
         .expect("dispatch ok");
     assert_eq!(out["location"]["name"], "Paris");
     assert_eq!(out["current"]["condition"], "Partly cloudy");
+}
+
+#[tokio::test]
+async fn web_search_search_parses_results_and_sends_query() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v2/search"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({ "query": "rust async", "limit": 5 }),
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "data": { "web": [
+                { "url": "https://a.example/", "title": "A", "description": "first" },
+                { "url": "https://b.example/", "title": "B", "description": "second" }
+            ]}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let plugin = WebSearchPlugin::new(server.uri(), String::new());
+    let out = plugin
+        .call("search", json!({ "query": "rust async" }))
+        .await
+        .expect("search succeeds");
+    let results = out
+        .get("results")
+        .and_then(Value::as_array)
+        .expect("results array");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].get("title").and_then(Value::as_str), Some("A"));
+    assert_eq!(
+        results[0].get("url").and_then(Value::as_str),
+        Some("https://a.example/")
+    );
+}
+
+#[tokio::test]
+async fn web_search_search_clamps_limit_and_passes_it() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v2/search"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({ "limit": 10 }),
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+            "success": true, "data": { "web": [] }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let plugin = WebSearchPlugin::new(server.uri(), String::new());
+    let out = plugin
+        .call("search", json!({ "query": "x", "limit": 99 }))
+        .await
+        .expect("search succeeds");
+    assert_eq!(
+        out.get("results").and_then(Value::as_array).map(Vec::len),
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn web_search_search_surfaces_firecrawl_error() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v2/search"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+            "success": false, "error": "No search backend configured"
+        })))
+        .mount(&server)
+        .await;
+    let plugin = WebSearchPlugin::new(server.uri(), String::new());
+    let err = plugin
+        .call("search", json!({ "query": "x" }))
+        .await
+        .expect_err("must fail");
+    assert!(err.contains("No search backend configured"), "{err}");
+}
+
+#[tokio::test]
+async fn web_search_fetch_returns_markdown_and_title() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v2/scrape"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            "url": "https://example.com/",
+            "formats": ["markdown"]
+        })))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "data": {
+                "markdown": "# Example Domain\n\nHello.",
+                "metadata": { "title": "Example Domain", "statusCode": 200 }
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let plugin = WebSearchPlugin::new(server.uri(), String::new());
+    let out = plugin
+        .call("fetch", json!({ "url": "https://example.com/" }))
+        .await
+        .expect("fetch succeeds");
+    assert_eq!(
+        out.get("title").and_then(Value::as_str),
+        Some("Example Domain")
+    );
+    assert!(out
+        .get("markdown")
+        .and_then(Value::as_str)
+        .expect("markdown present")
+        .contains("Hello."));
+}
+
+#[tokio::test]
+async fn web_search_fetch_rejects_oversized_body() {
+    let server = wiremock::MockServer::start().await;
+    let big = "x".repeat(65 * 1024);
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v2/scrape"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(big))
+        .mount(&server)
+        .await;
+    let plugin = WebSearchPlugin::new(server.uri(), String::new());
+    let err = plugin
+        .call("fetch", json!({ "url": "https://example.com/" }))
+        .await
+        .expect_err("must fail");
+    assert!(err.contains("exceeds"), "{err}");
+}
+
+#[tokio::test]
+async fn web_search_fetch_surfaces_upstream_http_error() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v2/scrape"))
+        .respond_with(wiremock::ResponseTemplate::new(500).set_body_json(json!({
+            "success": false, "error": "scrape failed"
+        })))
+        .mount(&server)
+        .await;
+    let plugin = WebSearchPlugin::new(server.uri(), String::new());
+    let err = plugin
+        .call("fetch", json!({ "url": "https://example.com/" }))
+        .await
+        .expect_err("must fail");
+    assert!(
+        err.contains("500") && err.contains("scrape failed"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn web_search_sends_bearer_key_when_configured() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v2/search"))
+        .and(wiremock::matchers::header(
+            "Authorization",
+            "Bearer fc-test-key",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+            "success": true, "data": { "web": [] }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let plugin = WebSearchPlugin::new(server.uri(), "fc-test-key".to_string());
+    plugin
+        .call("search", json!({ "query": "x" }))
+        .await
+        .expect("search succeeds");
+}
+
+#[tokio::test]
+async fn web_search_unknown_tool_errors() {
+    let plugin = WebSearchPlugin::new("http://127.0.0.1:1".to_string(), String::new());
+    let err = plugin
+        .call("nope", json!({}))
+        .await
+        .expect_err("unknown tool");
+    assert!(err.contains("nope"), "{err}");
 }
