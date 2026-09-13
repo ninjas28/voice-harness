@@ -296,3 +296,47 @@ async fn weather_spec_surfaces_and_unknown_tool_errors() {
         .expect_err("unknown tool must error");
     assert!(err.contains("nothing"), "{err}");
 }
+
+#[tokio::test]
+async fn weather_round_trip_through_registry_with_test_endpoints() {
+    let geo = wiremock::MockServer::start().await;
+    let api = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(
+            r#"{"results":[{"name":"Paris","latitude":48.85341,"longitude":2.3488,
+                "country":"France","admin1":"Île-de-France","timezone":"Europe/Paris"}]}"#,
+        ))
+        .mount(&geo)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(
+            r#"{"timezone":"Europe/Paris",
+                "current":{"time":"2026-09-12T14:30","temperature_2m":22.4,
+                    "apparent_temperature":23.1,"relative_humidity_2m":58,
+                    "is_day":1,"weather_code":2,"wind_speed_10m":11.2},
+                "daily":{"time":["2026-09-12"],"weather_code":[2],
+                    "temperature_2m_max":[24.1],"temperature_2m_min":[15.3],
+                    "precipitation_probability_max":[10]}}"#,
+        ))
+        .mount(&api)
+        .await;
+
+    let cfg = PluginsConfig {
+        enabled: vec!["weather".to_string()],
+        http_fetch: HttpFetchConfig::default(),
+        weather: WeatherConfig {
+            default_location: String::new(),
+            api_base: api.uri(),
+            geocoding_base: geo.uri(),
+        },
+        mcp: McpConfig::default(),
+    };
+    let registry = registry_from_config(&cfg);
+    assert!(spec_names(&registry).contains(&"weather.get_forecast".to_string()));
+    let out = registry
+        .dispatch("weather.get_forecast", json!({ "location": "Paris" }))
+        .await
+        .expect("dispatch ok");
+    assert_eq!(out["location"]["name"], "Paris");
+    assert_eq!(out["current"]["condition"], "Partly cloudy");
+}

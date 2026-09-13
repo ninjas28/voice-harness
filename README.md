@@ -18,7 +18,8 @@ mic audio ──▶ harness ──▶ STT (any OpenAI-compatible voice server)
   in, transcript + response + WAV audio out) and `WS /v1/realtime`
   (streaming audio in, streaming text + audio chunks out).
 - **Plugin/tool-call loop**: tool plugins answer LLM tool calls (a `time`
-  tool ships by default; external MCP servers plug in via `[plugins.mcp]`).
+  tool and a keyless `weather` tool ship by default; external MCP servers plug
+  in via `[plugins.mcp]`).
 - **macOS menu-bar client** (`clients/macos/voice-harness-client`): live
   transcript, phase indicator (listening/speech/thinking/speaking), and
   pitch-preserving TTS speed control.
