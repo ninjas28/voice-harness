@@ -2,7 +2,6 @@
 //! Subcommand: `harness-server auth <mcp-server-name> [config-path]` runs the
 //! OAuth 2.1 browser flow for one MCP server and stores its tokens.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use harness_core::config::Config;
@@ -83,8 +82,16 @@ async fn main() {
 }
 
 /// `auth` subcommand: run the OAuth flow for one configured MCP server.
+/// With no explicit path, auto-detects `config/voice-harness.toml` exactly
+/// like the server path does (falling back to defaults was a bug: it silently
+/// produced an empty server list).
 async fn run_auth_command(server_name: &str, config_path: Option<&str>) {
-    let config = Config::load(config_path.map(Path::new)).unwrap_or_else(|e| {
+    let config_path = config_path.map(std::path::PathBuf::from).or_else(|| {
+        std::path::PathBuf::from("config/voice-harness.toml")
+            .exists()
+            .then_some(std::path::PathBuf::from("config/voice-harness.toml"))
+    });
+    let config = Config::load(config_path.as_deref()).unwrap_or_else(|e| {
         eprintln!("failed to load config: {e}");
         std::process::exit(1);
     });
