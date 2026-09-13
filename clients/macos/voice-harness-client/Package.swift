@@ -3,7 +3,10 @@ import PackageDescription
 
 let package = Package(
     name: "voice-harness-client",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v13), .iOS(.v17)],
+    products: [
+        .library(name: "voicekit", targets: ["voicekit"])
+    ],
     targets: [
         .target(name: "voicekit"),
         .executableTarget(
