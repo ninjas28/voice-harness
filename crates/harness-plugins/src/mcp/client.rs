@@ -219,6 +219,22 @@ impl McpHttpClient {
         Ok(())
     }
 
+    /// `tools/call` → the raw MCP result object
+    /// (`content: [...], isError?, structuredContent?`).
+    pub async fn call_tool(
+        &mut self,
+        bearer: Option<&str>,
+        name: &str,
+        arguments: Value,
+    ) -> Result<Value, String> {
+        self.rpc(
+            bearer,
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        )
+        .await
+    }
+
     /// `tools/list` → advertised tools.
     pub async fn list_tools(&mut self, bearer: Option<&str>) -> Result<Vec<McpTool>, String> {
         let result = self.rpc(bearer, "tools/list", json!({})).await?;
@@ -412,5 +428,132 @@ mod tests {
         c.initialize(None).await.expect("init ok");
         let err = c.list_tools(None).await.expect_err("rpc error must Err");
         assert!(err.contains("-32601"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn call_tool_returns_result_and_bearer() {
+        let server = wiremock::MockServer::start().await;
+        mount_initialize(&server, "s1").await;
+        wiremock::Mock::given(method("POST"))
+            .and(body_partial_json(json!({ "method": "tools/call" })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "jsonrpc": "2.0", "id": 2,
+                        "result": { "content": [ { "type": "text", "text": "72F sunny" } ],
+                                    "isError": false }
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let mut c = client(&server.uri());
+        c.initialize(Some("sk-test")).await.expect("init ok");
+        let out = c
+            .call_tool(Some("sk-test"), "weather", json!({ "city": "Oslo" }))
+            .await
+            .expect("call ok");
+        assert_eq!(out["content"][0]["text"], "72F sunny");
+        let received = server.received_requests().await.expect("requests");
+        assert!(
+            received
+                .iter()
+                .all(|r| r.headers.get("authorization").is_some()),
+            "bearer token on every request"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_parses_sse_response_with_keepalive() {
+        let server = wiremock::MockServer::start().await;
+        mount_initialize(&server, "s2").await;
+        wiremock::Mock::given(method("POST"))
+            .and(body_partial_json(json!({ "method": "tools/call" })))
+            .respond_with(
+                // wiremock 0.6 replaces a user-inserted content-type with the
+                // body mime, so use `set_body_raw` to get `text/event-stream`.
+                wiremock::ResponseTemplate::new(200).set_body_raw(
+                    concat!(
+                        ": keepalive\n\n",
+                        "event: message\n",
+                        "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"from sse\"}]}}\n\n",
+                    )
+                    .as_bytes()
+                    .to_vec(),
+                    "text/event-stream",
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let mut c = client(&server.uri());
+        c.initialize(None).await.expect("init ok");
+        let out = c.call_tool(None, "echo", json!({})).await.expect("call ok");
+        assert_eq!(out["content"][0]["text"], "from sse");
+    }
+
+    #[tokio::test]
+    async fn session_expiry_404_reinitializes_and_retries_once() {
+        let server = wiremock::MockServer::start().await;
+        mount_initialize(&server, "fresh").await; // matches initial + re-init
+        wiremock::Mock::given(method("POST"))
+            .and(body_partial_json(json!({ "method": "tools/list" })))
+            .respond_with(wiremock::ResponseTemplate::new(404).set_body_string("session gone"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(method("POST"))
+            .and(body_partial_json(json!({ "method": "tools/list" })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "jsonrpc": "2.0", "id": 9,
+                        "result": { "tools": [ { "name": "t1" } ] }
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let mut c = client(&server.uri());
+        c.initialize(None).await.expect("init ok");
+        let tools = c.list_tools(None).await.expect("retry succeeds");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "t1");
+    }
+
+    #[tokio::test]
+    async fn slow_response_times_out_bounded() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_delay(Duration::from_secs(2))
+                    .set_body_json(json!({ "jsonrpc": "2.0", "id": 1, "result": {} })),
+            )
+            .mount(&server)
+            .await;
+
+        // Client timeout of 100 ms against a 2 s delay → bounded timeout error.
+        let mut c = McpHttpClient::new(server.uri(), Duration::from_millis(100));
+        let err = c.initialize(None).await.expect_err("must time out");
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn auth_required_is_a_sentinel_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(401).set_body_string("no token"))
+            .mount(&server)
+            .await;
+        let mut c = client(&server.uri());
+        let err = c
+            .initialize(None)
+            .await
+            .expect_err("401 must map to sentinel");
+        assert_eq!(err, ERR_AUTH_REQUIRED);
     }
 }
