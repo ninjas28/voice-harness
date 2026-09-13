@@ -31,6 +31,8 @@ abbreviation — always spell out the full word:
   which is fourteen."
 - Acronyms: use only ones people actually speak (NASA, PIN, USB). Anything else gets
   spelled out in full on first use: "artificial intelligence".
+- Names for things that contain both letters and a number should be written out how 
+  they would sound ("M3 screw" → "em-three screw", "GA100" → "gee-ay one hundred")
 - No markdown, no formatting, no emojis: no asterisks, bullets, headers, numbered lists,
   tables, links, code blocks, or emoji. The engine reads those symbols aloud. For
   sequences, speak them: "First... Second... Third..."
