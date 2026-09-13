@@ -7,7 +7,7 @@ fn client_for(server: &wiremock::MockServer) -> OpenAiTtsClient {
         server.uri(),
         "/v1/audio/speech",
         "tts-key",
-        "magpie-tts",
+        "tts-model",
         "default",
         "wav",
     )
@@ -18,7 +18,7 @@ fn client_for_raw(server: &wiremock::MockServer, raw_rate: u32) -> OpenAiTtsClie
         server.uri(),
         "/v1/audio/speech",
         "tts-key",
-        "magpie-tts",
+        "tts-model",
         "default",
         "pcm",
         raw_rate,
@@ -70,7 +70,7 @@ async fn wav_response_is_parsed_to_16k_pcm16() {
             "Bearer tts-key",
         ))
         .and(wiremock::matchers::body_partial_json(serde_json::json!({
-            "model": "magpie-tts",
+            "model": "tts-model",
             "voice": "default",
             "input": "hello there",
             "response_format": "wav"
@@ -161,7 +161,7 @@ async fn from_config_uses_tts_section() {
         base_url: server.uri(),
         speech_path: "/v1/audio/speech".into(),
         api_key: "cfg-key".into(),
-        model: "magpie-tts".into(),
+        model: "tts-model".into(),
         voice: "default".into(),
         response_format: "wav".into(),
         ..cfg

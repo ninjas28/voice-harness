@@ -8,11 +8,9 @@ making changes; it encodes conventions and hard-won lessons from this codebase.
 **voice-harness** is a Rust daemon bridging audio clients (ESP32-class smart
 speakers, the bundled macOS menu-bar client) to self-hosted voice services:
 
-- **STT/TTS**: nemo-speech.cpp at `https://voicebox.zippystation.com`
-  (OpenAI-compatible API + `/v1/realtime` audio streaming)
-- **LLM**: Open WebUI at `https://ai.zippystation.com/api`
-  (chat route `/v1/chat/completions`, model `glm53` — note the client
-  configures `base_url + chat_path`; don't double-prefix `/api`)
+- **STT/TTS**: any OpenAI-compatible voice server (`/v1/audio/*` routes)
+- **LLM**: any OpenAI-compatible chat endpoint (e.g. Open WebUI) — note the
+  client configures `base_url + chat_path`; don't double-prefix `/api`
 
 The harness packages a transcribed turn with a system prompt and MCP-style
 plugins, calls the LLM, streams the response back as text deltas and
@@ -121,8 +119,7 @@ open /Applications/VoiceHarnessClient.app
 ```
 
 The app is launchd-owned via `open`; bare background launches get reaped.
-Settings live in the `com.zippystation.voice-harness-client` defaults domain
-(`server_url`, `tts_rate`).
+Settings persist in the app's `UserDefaults` domain (`server_url`, `tts_rate`).
 
 ## Style
 

@@ -7,24 +7,27 @@ bind = "127.0.0.1:8090"
 api_keys = []                      # empty = require none (localhost/LAN trust)
 
 [stt]
-base_url = "https://voicebox.zippystation.com"
+base_url = "http://127.0.0.1:8000"
 api_key = "SET-ME"
 chat_path = "/v1/audio/transcriptions"
-model = "nemotron-asr"
+model = "asr-model"                # e.g. whisper-large-v3, parakeet
 
 [tts]
-base_url = "https://voicebox.zippystation.com"
+base_url = "http://127.0.0.1:8000"
 api_key = "SET-ME"
 speech_path = "/v1/audio/speech"
-model = "magpie-tts"
+model = "tts-model"                # e.g. kokoro, piper-tts, xtts
 voice = "default"
 response_format = "wav"
 raw_sample_rate = 16000             # sample rate of upstream *raw* PCM (ignored for WAV responses)
 
 [llm]
-base_url = "https://ai.zippystation.com/api"
+# Open WebUI example: base_url ends in /api, chat_path starts with /v1/ —
+# the two are concatenated (don't double-prefix). Plain OpenAI-compatible
+# servers: base_url = "http://127.0.0.1:8080", chat_path = "/v1/chat/completions".
+base_url = "http://127.0.0.1:3000/api"
 api_key = "SET-ME"
-chat_path = "/api/chat/completions"   # alternates: /v1/chat/completions
+chat_path = "/v1/chat/completions"
 model = "default"
 # reasoning_effort = "low"            # optional: sent as `reasoning_effort` on every request ("minimal"/"low"/"medium"/"high"); unset = not sent
 
@@ -56,6 +59,6 @@ enabled = ["time", "http_fetch"]
 # api_key = "SET-ME"
 # [[plugins.mcp.servers]]
 # name = "home"
-# url = "https://home.zippystation.com/mcp"
+# url = "https://mcp.example.org/mcp"
 # auth = "oauth"
 # scopes = ["home.read"]

@@ -12,7 +12,7 @@ fn client_for(server: &wiremock::MockServer) -> OpenAiSttClient {
         server.uri(),
         "/v1/audio/transcriptions",
         "stt-key",
-        "nemotron-asr",
+        "asr-model",
     )
 }
 
@@ -55,7 +55,7 @@ async fn multipart_upload_parses_transcript_response() {
     assert!(body.contains("name=\"file\""), "file part: {body}");
     assert!(body.contains("filename=\"audio.wav\""), "file name: {body}");
     assert!(body.contains("name=\"model\""), "model field: {body}");
-    assert!(body.contains("nemotron-asr"), "model value: {body}");
+    assert!(body.contains("asr-model"), "model value: {body}");
     let ct = reqs[0]
         .headers
         .get("content-type")

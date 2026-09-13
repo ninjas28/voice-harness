@@ -1,7 +1,7 @@
 # voice-harness server deployment
 
-Target: a Linux box running the harness in front of nemo-speech.cpp
-(voicebox) and Open WebUI (ai.zippystation.com).
+Target: a Linux box running the harness in front of any OpenAI-compatible
+voice server (STT/TTS) and chat endpoint (LLM), e.g. Open WebUI.
 
 ## 1. Build and install the binary
 
@@ -29,10 +29,10 @@ Edit `/etc/voice-harness/voice-harness.toml`:
 
 - `[server] bind` — `127.0.0.1:8090` to keep it private (reverse proxy in
   front), or `0.0.0.0:8090` / LAN IP for ESP32 clients on the LAN.
-- `[stt]` / `[tts]` — voicebox API keys
-- `[llm]` — Open WebUI key; remember `base_url + chat_path` concatenate
-  (`https://ai.zippystation.com/api` + `/v1/chat/completions` — don't
-  double-prefix `/api`).
+- `[stt]` / `[tts]` — voice-server API keys
+- `[llm]` — chat endpoint key; remember `base_url + chat_path` concatenate
+  (for Open WebUI: `base_url` ends in `/api`, `chat_path` starts with
+  `/v1/` — don't double-prefix).
 
 Optional: drop `VH_*` overrides (e.g. `VH_STT__API_KEY=...`) into
 `/etc/voice-harness/env` (0600). Env vars win over the file. Keep secrets out

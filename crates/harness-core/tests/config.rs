@@ -23,15 +23,15 @@ fn defaults_parse_with_no_file() {
     let cfg = Config::load(None).expect("defaults load");
     assert_eq!(cfg.server.bind, "127.0.0.1:8090");
     assert!(cfg.server.api_keys.is_empty());
-    assert_eq!(cfg.stt.base_url, "https://voicebox.zippystation.com");
+    assert_eq!(cfg.stt.base_url, "http://127.0.0.1:8000");
     assert_eq!(cfg.stt.chat_path, "/v1/audio/transcriptions");
-    assert_eq!(cfg.stt.model, "nemotron-asr");
+    assert_eq!(cfg.stt.model, "asr-model");
     assert_eq!(cfg.stt.api_key, ""); // empty until validate() complains
-    assert_eq!(cfg.tts.model, "magpie-tts");
+    assert_eq!(cfg.tts.model, "tts-model");
     assert_eq!(cfg.tts.voice, "default");
     assert_eq!(cfg.tts.response_format, "wav");
-    assert_eq!(cfg.llm.base_url, "https://ai.zippystation.com/api");
-    assert_eq!(cfg.llm.chat_path, "/api/chat/completions");
+    assert_eq!(cfg.llm.base_url, "http://127.0.0.1:3000/api");
+    assert_eq!(cfg.llm.chat_path, "/v1/chat/completions");
     assert_eq!(cfg.llm.model, "default");
     assert_eq!(cfg.session.silence_ms, 700);
     assert_eq!(cfg.session.min_utterance_ms, 300);

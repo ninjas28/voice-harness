@@ -57,7 +57,7 @@ impl TtsProvider for MockTts {
             self.url.clone(),
             "/v1/audio/speech",
             "test-tts-key",
-            "magpie",
+            "tts-model",
             "default",
             "wav",
         );
@@ -79,7 +79,7 @@ impl SttProvider for MockStt {
             self.url.clone(),
             "/v1/audio/transcriptions",
             "test-stt-key",
-            "nemotron",
+            "asr-model",
         );
         client.transcribe(pcm16k).await
     }

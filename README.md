@@ -4,12 +4,12 @@ A Rust daemon that bridges audio clients — ESP32-class smart speakers, the
 bundled macOS menu-bar client — to self-hosted voice services:
 
 ```
-mic audio ──▶ harness ──▶ STT (nemo-speech.cpp @ voicebox.zippystation.com)
+mic audio ──▶ harness ──▶ STT (any OpenAI-compatible voice server)
                  │
-                 ├─▶ LLM (Open WebUI @ ai.zippystation.com/api, model glm53)
-                 │      └─ custom system prompt + MCP-style tool plugins
+                 ├─▶ LLM (any OpenAI-compatible chat endpoint, e.g. Open WebUI)
+                 │      └─ custom system prompt + tool plugins (incl. MCP)
                  │
-                 └─▶ TTS (voicebox) ──▶ sentence-chunked audio back to client
+                 └─▶ TTS (same voice server) ──▶ sentence-chunked audio back to client
 ```
 
 - **Server-side VAD** with utterance endpointing: clients just stream mic
@@ -17,8 +17,8 @@ mic audio ──▶ harness ──▶ STT (nemo-speech.cpp @ voicebox.zippystati
 - **Two surfaces**: `POST /v1/turn` (JSON: pre-transcribed text or base64 audio
   in, transcript + response + WAV audio out) and `WS /v1/realtime`
   (streaming audio in, streaming text + audio chunks out).
-- **Plugin/tool-call loop**: MCP-style plugins answer LLM tool calls (a `time`
-  tool ships by default).
+- **Plugin/tool-call loop**: tool plugins answer LLM tool calls (a `time`
+  tool ships by default; external MCP servers plug in via `[plugins.mcp]`).
 - **macOS menu-bar client** (`clients/macos/voice-harness-client`): live
   transcript, phase indicator (listening/speech/thinking/speaking), and
   pitch-preserving TTS speed control.
@@ -32,7 +32,7 @@ the OAuth browser flow once; token refresh is automatic).
 
 ## Building
 
-Requires Rust (stable, edition 2024).
+Requires Rust (stable, edition 2021).
 
 ```sh
 cargo build --release
@@ -56,11 +56,10 @@ swift build
 
 - `[server]` — bind address, `api_keys` (clients must present one as a bearer
   token), `sample_rate` (16 kHz)
-- `[stt]` / `[tts]` — voicebox base URL + API key
-- `[llm]` — Open WebUI `base_url` **plus** `chat_path`
-  (`base_url = "https://ai.zippystation.com/api"`,
-  `chat_path = "/v1/chat/completions"` — the two are concatenated; don't
-  double-prefix), `model`, `system_prompt`
+- `[stt]` / `[tts]` — voice-server base URL + API key
+- `[llm]` — chat endpoint `base_url` **plus** `chat_path` (the two are
+  concatenated; don't double-prefix — for Open WebUI, `base_url` ends in
+  `/api` and `chat_path` starts with `/v1/`), `model`, `reasoning_effort`
 
 ## Wire protocol (`/v1/realtime`)
 
@@ -100,9 +99,8 @@ cargo run --release --example loopback -- \
 
 ## Client notes (macOS)
 
-- The panel is a `MenuBarExtra` window; settings persist in the
-  `com.zippystation.voice-harness-client` defaults domain (`server_url`,
-  `tts_rate`).
+- The panel is a `MenuBarExtra` window; settings persist in the app's
+  `UserDefaults` domain (`server_url`, `tts_rate`).
 - Mic and playback share one `AVAudioEngine` — required for Bluetooth headsets
   (two engines fight over the route and playback goes silent).
 - Deploy as an app bundle under `/Applications` and launch with `open`

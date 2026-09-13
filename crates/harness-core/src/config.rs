@@ -45,13 +45,13 @@ pub struct SttConfig {
 }
 
 fn default_stt_base_url() -> String {
-    "https://voicebox.zippystation.com".to_string()
+    "http://127.0.0.1:8000".to_string()
 }
 fn default_stt_chat_path() -> String {
     "/v1/audio/transcriptions".to_string()
 }
 fn default_stt_model() -> String {
-    "nemotron-asr".to_string()
+    "asr-model".to_string()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -80,13 +80,13 @@ fn default_tts_raw_sample_rate() -> u32 {
 }
 
 fn default_tts_base_url() -> String {
-    "https://voicebox.zippystation.com".to_string()
+    "http://127.0.0.1:8000".to_string()
 }
 fn default_tts_speech_path() -> String {
     "/v1/audio/speech".to_string()
 }
 fn default_tts_model() -> String {
-    "magpie-tts".to_string()
+    "tts-model".to_string()
 }
 fn default_tts_voice() -> String {
     "default".to_string()
@@ -112,10 +112,10 @@ pub struct LlmConfig {
 }
 
 fn default_llm_base_url() -> String {
-    "https://ai.zippystation.com/api".to_string()
+    "http://127.0.0.1:3000/api".to_string()
 }
 fn default_llm_chat_path() -> String {
-    "/api/chat/completions".to_string()
+    "/v1/chat/completions".to_string()
 }
 fn default_llm_model() -> String {
     "default".to_string()
@@ -404,7 +404,7 @@ api_key = "sk-test"
 
 [[plugins.mcp.servers]]
 name = "home"
-url = "https://home.zippystation.com/mcp"
+url = "https://mcp.example.org/mcp"
 auth = "oauth"
 scopes = ["home.read"]
 "#,
