@@ -125,13 +125,35 @@ cargo run --release --example loopback -- \
 - Deploy as an app bundle under `/Applications` and launch with `open`
   (launchd-owned); bare background launches get reaped.
 
+## Client notes (iOS)
+
+- `clients/ios/voice-harness-client` is an XcodeGen project: run
+  `xcodegen generate` (from that directory), then build with
+  `xcodebuild -project VoiceHarnessApp.xcodeproj -scheme VoiceHarnessApp
+  -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=18.5' build`.
+- It consumes the same `voicekit` package as the macOS client (SwiftPM path
+  dependency; the package exposes it as a library product). Protocol,
+  transport, audio, settings, and session-model code is single-sourced, and
+  the same test suite runs on macOS (`swift test`) and the iOS simulator
+  (`xcodebuild test`).
+- "Toggle Voice Harness" App Shortcut: assign via Settings → Action Button →
+  Shortcut, add to Home Screen from Shortcuts (ⓘ → Add to Home Screen), or
+  Back Tap (Settings → Accessibility → Touch → Back Tap).
+- `UIBackgroundModes: audio` keeps the session alive when the phone locks;
+  the first Start triggers the iOS mic permission prompt.
+
 ## Status
 
 - Harness: complete — 141 Rust tests green (fmt + clippy clean), verified
   end-to-end against the real STT/TTS/LLM servers (text turn, audio turn, WS
   streaming with server-side VAD).
-- macOS client: complete — 38 Swift tests green; live-verified: mic streaming,
+- macOS client: complete — 30 Swift tests green; live-verified: mic streaming,
   server VAD turns, streamed TTS playback with adjustable speed, phase
   tracking owned by the client during playback, in-panel server URL editor.
+- iOS client: complete (simulator) — shares the `voicekit` package with macOS
+  (30 tests green on the iOS simulator too); "Toggle Voice Harness" App
+  Shortcut for Action Button / Home Screen / Back Tap; launches and renders
+  the panel on the simulator. Pending: live E2E voice check against the real
+  server (human-assisted) and real-device build (needs signing).
 - Deferred (by design): mic-paused-while-speaking (no barge-in without AEC),
   push-to-talk. Server deployment uses the systemd unit in `deploy/`.

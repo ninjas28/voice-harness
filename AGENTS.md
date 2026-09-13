@@ -26,6 +26,7 @@ crates/
   harness-server/    axum HTTP (`POST /v1/turn`) + WS (`/v1/realtime`)
 examples/loopback.rs WAV file → full turn over WS (manual E2E check)
 clients/macos/voice-harness-client/  SwiftPM macOS menu-bar client
+clients/ios/voice-harness-client/    iOS app (XcodeGen project; shares voicekit via path dep)
 config/voice-harness.toml             server config (API keys — never commit)
 .hermes/plans/                        task plans (markdown)
 ```
