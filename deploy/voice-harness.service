@@ -1,0 +1,62 @@
+# voice-harness systemd unit.
+#
+# Install (see deploy/README.md for the full walkthrough):
+#   sudo cp deploy/voice-harness.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now voice-harness
+#
+# Expects:
+#   /usr/local/bin/harness-server                    release binary (cargo build --release)
+#   /etc/voice-harness/voice-harness.toml  (0600)    server config (secrets — never commit)
+#   /etc/voice-harness/env                 (0600)    optional VH_* env overrides
+#   system user/group voice-harness
+#
+# Logs go to the journal: journalctl -u voice-harness -f
+
+[Unit]
+Description=voice-harness voice assistant bridge
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=30
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=voice-harness
+Group=voice-harness
+ExecStart=/usr/local/bin/harness-server /etc/voice-harness/voice-harness.toml
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/voice-harness/env
+WorkingDirectory=/var/lib/voice-harness
+StateDirectory=voice-harness
+LogsDirectory=voice-harness
+UMask=0077
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+LimitNOFILE=16384
+
+# Hardening: read-only filesystem except the state dir, no capabilities,
+# no user namespaces, network syscalls only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

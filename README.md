@@ -110,4 +110,4 @@ cargo run --release --example loopback -- \
   server VAD turns, streamed TTS playback with adjustable speed, phase
   tracking owned by the client during playback.
 - Deferred (by design): mic-paused-while-speaking (no barge-in without AEC),
-  systemd unit for server deployment, push-to-talk.
+  push-to-talk. Server deployment uses the systemd unit in `deploy/`.
