@@ -1,6 +1,6 @@
 //! Integration tests for the plugin registry + built-ins.
 
-use harness_core::config::{HttpFetchConfig, PluginsConfig};
+use harness_core::config::{HttpFetchConfig, McpConfig, PluginsConfig};
 use harness_plugins::{registry_from_config, PluginRegistry};
 use serde_json::json;
 
@@ -22,6 +22,7 @@ async fn dispatch_round_trip_and_unknown_tool_error() {
     let cfg = PluginsConfig {
         enabled: vec!["time".to_string()],
         http_fetch: HttpFetchConfig::default(),
+        mcp: McpConfig::default(),
     };
     let registry = registry_from_config(&cfg);
 
@@ -58,6 +59,7 @@ async fn tool_specs_are_concatenated_and_namespaced() {
         http_fetch: HttpFetchConfig {
             allowed_hosts: vec!["example.com".to_string()],
         },
+        mcp: McpConfig::default(),
     };
     let registry = registry_from_config(&cfg);
     let names = spec_names(&registry);
@@ -77,6 +79,7 @@ async fn registry_from_config_honors_enabled_list() {
     let cfg = PluginsConfig {
         enabled: vec!["time".to_string()],
         http_fetch: HttpFetchConfig::default(),
+        mcp: McpConfig::default(),
     };
     let registry = registry_from_config(&cfg);
     let names = spec_names(&registry);
@@ -90,6 +93,7 @@ async fn registry_from_config_honors_enabled_list() {
     let empty = registry_from_config(&PluginsConfig {
         enabled: vec![],
         http_fetch: HttpFetchConfig::default(),
+        mcp: McpConfig::default(),
     });
     assert!(spec_names(&empty).is_empty());
 
@@ -97,6 +101,7 @@ async fn registry_from_config_honors_enabled_list() {
     let both = registry_from_config(&PluginsConfig {
         enabled: vec!["time".to_string(), "http_fetch".to_string()],
         http_fetch: HttpFetchConfig::default(),
+        mcp: McpConfig::default(),
     });
     assert_eq!(spec_names(&both).len(), 2);
 }
@@ -126,6 +131,7 @@ async fn http_fetch_fetches_allowlisted_host_and_strips_html() {
         http_fetch: HttpFetchConfig {
             allowed_hosts: vec![host.clone()],
         },
+        mcp: McpConfig::default(),
     };
     let registry = registry_from_config(&cfg);
     let out = registry
@@ -148,6 +154,7 @@ async fn http_fetch_denies_non_allowlisted_host_without_requesting() {
         http_fetch: HttpFetchConfig {
             allowed_hosts: vec!["example.com".to_string()],
         },
+        mcp: McpConfig::default(),
     };
     let registry = registry_from_config(&cfg);
     let err = registry
@@ -188,6 +195,7 @@ async fn http_fetch_reports_upstream_error_status() {
         http_fetch: HttpFetchConfig {
             allowed_hosts: vec![host],
         },
+        mcp: McpConfig::default(),
     };
     let registry = registry_from_config(&cfg);
     // 5xx still returns a result object with the status — the LLM decides.

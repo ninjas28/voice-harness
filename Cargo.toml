@@ -39,6 +39,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # upstream clients
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 eventsource-stream = "0.2"
+sha2 = "0.10"
+getrandom = "0.2"
 
 # voice
 webrtc-vad = "0.4"

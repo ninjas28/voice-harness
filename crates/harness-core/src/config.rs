@@ -177,6 +177,9 @@ pub struct PluginsConfig {
     /// Host allowlist for the `http_fetch` built-in (deny by default).
     #[serde(default)]
     pub http_fetch: HttpFetchConfig,
+    /// MCP servers exposed as tools (Streamable HTTP).
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -184,6 +187,51 @@ pub struct HttpFetchConfig {
     /// Hosts `http_fetch` may GET. Empty = deny everything.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+}
+
+/// MCP (Model Context Protocol) servers exposed as tools over Streamable HTTP.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpConfig {
+    /// Where OAuth tokens for MCP servers are persisted. Never commit this file.
+    #[serde(default = "default_mcp_token_store")]
+    pub token_store: String,
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            token_store: default_mcp_token_store(),
+            servers: Vec::new(),
+        }
+    }
+}
+
+fn default_mcp_token_store() -> String {
+    "config/mcp-tokens.json".to_string()
+}
+
+/// One MCP server. Its tools surface to the LLM as `mcp.<name>.<tool>`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// `[A-Za-z0-9_-]+` — must not contain `.` (the registry tool separator).
+    pub name: String,
+    /// Streamable HTTP endpoint, e.g. `https://mcp.example.com/mcp`.
+    pub url: String,
+    /// `"bearer"` (uses `api_key`) or `"oauth"`.
+    #[serde(default)]
+    pub auth: String,
+    /// Bearer token when `auth = "bearer"`.
+    #[serde(default)]
+    pub api_key: String,
+    /// OAuth scopes to request when `auth = "oauth"`.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Static OAuth client_id — only needed if the server lacks dynamic
+    /// client registration.
+    #[serde(default)]
+    pub client_id: String,
 }
 
 fn default_enabled_plugins() -> Vec<String> {
@@ -233,6 +281,7 @@ impl Default for Config {
             plugins: PluginsConfig {
                 enabled: default_enabled_plugins(),
                 http_fetch: Default::default(),
+                mcp: Default::default(),
             },
         }
     }
@@ -298,6 +347,52 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_config_defaults_and_parses_from_toml() {
+        // Defaults: no servers, default token store path.
+        let defaults = Config::load(None).expect("defaults load");
+        assert!(defaults.plugins.mcp.servers.is_empty());
+        assert_eq!(defaults.plugins.mcp.token_store, "config/mcp-tokens.json");
+
+        let path = std::env::temp_dir().join(format!("vh-mcp-cfg-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"
+[plugins]
+enabled = ["time", "mcp"]
+
+[plugins.mcp]
+token_store = "/tmp/vh-tokens.json"
+
+[[plugins.mcp.servers]]
+name = "weather"
+url = "https://mcp.example.com/mcp"
+auth = "bearer"
+api_key = "sk-test"
+
+[[plugins.mcp.servers]]
+name = "home"
+url = "https://home.zippystation.com/mcp"
+auth = "oauth"
+scopes = ["home.read"]
+"#,
+        )
+        .expect("write temp config");
+        let cfg = Config::load(Some(&path)).expect("parses");
+        assert_eq!(
+            cfg.plugins.enabled,
+            vec!["time".to_string(), "mcp".to_string()]
+        );
+        assert_eq!(cfg.plugins.mcp.servers.len(), 2);
+        let weather = &cfg.plugins.mcp.servers[0];
+        assert_eq!(weather.name, "weather");
+        assert_eq!(weather.auth, "bearer");
+        assert_eq!(weather.api_key, "sk-test");
+        let home = &cfg.plugins.mcp.servers[1];
+        assert_eq!(home.auth, "oauth");
+        assert_eq!(home.scopes, vec!["home.read".to_string()]);
+    }
 
     /// The checked-in example config must always parse against the real
     /// `Config` struct — guards the template against field drift.

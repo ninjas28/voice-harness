@@ -41,3 +41,19 @@ system = "You are a helpful home voice assistant. Answer concisely — 1 to 3 se
 
 [plugins]
 enabled = ["time", "http_fetch"]
+
+# Optional MCP (Model Context Protocol) servers, exposed as tools `mcp.<name>.<tool>`.
+# OAuth tokens are persisted to token_store (chmod 600, never commit it). Authorize
+# an OAuth server once with: harness-server auth <name> [config-path]
+# [plugins.mcp]
+# token_store = "config/mcp-tokens.json"
+# [[plugins.mcp.servers]]
+# name = "weather"
+# url = "https://mcp.example.com/mcp"
+# auth = "bearer"
+# api_key = "SET-ME"
+# [[plugins.mcp.servers]]
+# name = "home"
+# url = "https://home.zippystation.com/mcp"
+# auth = "oauth"
+# scopes = ["home.read"]
