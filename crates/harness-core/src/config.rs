@@ -203,6 +203,9 @@ pub struct PluginsConfig {
     /// Host allowlist for the `http_fetch` built-in (deny by default).
     #[serde(default)]
     pub http_fetch: HttpFetchConfig,
+    /// Web search/fetch via self-hosted Firecrawl.
+    #[serde(default)]
+    pub web_search: WebSearchConfig,
     /// Built-in weather plugin settings (Open-Meteo).
     #[serde(default)]
     pub weather: WeatherConfig,
@@ -216,6 +219,20 @@ pub struct HttpFetchConfig {
     /// Hosts `http_fetch` may GET. Empty = deny everything.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+}
+
+/// `[plugins.web_search]`: web search + page fetch via a self-hosted
+/// Firecrawl instance (`POST /v2/search`, `POST /v2/scrape`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WebSearchConfig {
+    /// Base URL of the Firecrawl server, e.g. `http://192.168.10.94:3002`.
+    /// Empty = the plugin contributes no tools even if listed in `enabled`.
+    #[serde(default)]
+    pub base_url: String,
+    /// Optional bearer token (cloud Firecrawl). Empty = no auth header
+    /// (self-hosted default).
+    #[serde(default)]
+    pub api_key: String,
 }
 
 /// `[plugins.weather]`: built-in weather via Open-Meteo (keyless).
@@ -335,6 +352,7 @@ impl Default for Config {
             plugins: PluginsConfig {
                 enabled: default_enabled_plugins(),
                 http_fetch: Default::default(),
+                web_search: Default::default(),
                 weather: Default::default(),
                 mcp: Default::default(),
             },
@@ -505,6 +523,31 @@ geocoding_base = "http://127.0.0.1:8080/v1/search"
             cfg.plugins.weather.geocoding_base,
             "http://127.0.0.1:8080/v1/search"
         );
+    }
+
+    #[test]
+    fn web_search_config_defaults_and_parses_from_toml() {
+        let defaults = Config::load(None).expect("defaults load");
+        assert!(defaults.plugins.web_search.base_url.is_empty());
+        assert!(defaults.plugins.web_search.api_key.is_empty());
+
+        let path =
+            std::env::temp_dir().join(format!("vh-websearch-cfg-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"
+[plugins]
+enabled = ["time", "web_search"]
+
+[plugins.web_search]
+base_url = "http://192.168.10.94:3002"
+api_key = "fc-selfhosted-no-key"
+"#,
+        )
+        .expect("write temp config");
+        let cfg = Config::load(Some(&path)).expect("parses");
+        assert_eq!(cfg.plugins.web_search.base_url, "http://192.168.10.94:3002");
+        assert_eq!(cfg.plugins.web_search.api_key, "fc-selfhosted-no-key");
     }
 
     /// The checked-in example config must always parse against the real

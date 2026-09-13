@@ -1,6 +1,6 @@
 //! Integration tests: the `mcp` plugin end-to-end against wiremock servers.
 
-use harness_core::config::{McpConfig, McpServerConfig, PluginsConfig};
+use harness_core::config::{McpConfig, McpServerConfig, PluginsConfig, WebSearchConfig};
 use harness_plugins::mcp::oauth::{StoredToken, TokenStore};
 use harness_plugins::{registry_from_config, PluginRegistry};
 use serde_json::{json, Value};
@@ -163,6 +163,7 @@ async fn bearer_and_oauth_servers_surface_tools_and_dispatch() {
 
     let cfg = PluginsConfig {
         enabled: vec!["mcp".to_string()],
+        web_search: WebSearchConfig::default(),
         mcp: McpConfig {
             token_store: token_path.to_string_lossy().into_owned(),
             servers: vec![
@@ -222,6 +223,7 @@ async fn oauth_server_without_token_is_skipped_with_warning() {
 
     let cfg = PluginsConfig {
         enabled: vec!["mcp".to_string()],
+        web_search: WebSearchConfig::default(),
         mcp: McpConfig {
             token_store: token_path.to_string_lossy().into_owned(),
             servers: vec![McpServerConfig {
@@ -285,6 +287,7 @@ async fn is_error_tool_result_maps_to_err() {
     let token_path = dir.join("tokens.json");
     let cfg = PluginsConfig {
         enabled: vec!["mcp".to_string()],
+        web_search: WebSearchConfig::default(),
         mcp: McpConfig {
             token_store: token_path.to_string_lossy().into_owned(),
             servers: vec![McpServerConfig {

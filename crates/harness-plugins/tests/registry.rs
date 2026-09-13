@@ -1,6 +1,8 @@
 //! Integration tests for the plugin registry + built-ins.
 
-use harness_core::config::{HttpFetchConfig, McpConfig, PluginsConfig, WeatherConfig};
+use harness_core::config::{
+    HttpFetchConfig, McpConfig, PluginsConfig, WeatherConfig, WebSearchConfig,
+};
 use harness_plugins::{registry_from_config, PluginRegistry};
 use serde_json::{json, Value};
 
@@ -80,6 +82,7 @@ async fn dispatch_round_trip_and_unknown_tool_error() {
     let cfg = PluginsConfig {
         enabled: vec!["time".to_string()],
         http_fetch: HttpFetchConfig::default(),
+        web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     };
@@ -118,6 +121,7 @@ async fn tool_specs_are_concatenated_and_namespaced() {
         http_fetch: HttpFetchConfig {
             allowed_hosts: vec!["example.com".to_string()],
         },
+        web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     };
@@ -139,6 +143,7 @@ async fn registry_from_config_honors_enabled_list() {
     let cfg = PluginsConfig {
         enabled: vec!["time".to_string()],
         http_fetch: HttpFetchConfig::default(),
+        web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     };
@@ -154,6 +159,7 @@ async fn registry_from_config_honors_enabled_list() {
     let empty = registry_from_config(&PluginsConfig {
         enabled: vec![],
         http_fetch: HttpFetchConfig::default(),
+        web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     });
@@ -163,6 +169,7 @@ async fn registry_from_config_honors_enabled_list() {
     let both = registry_from_config(&PluginsConfig {
         enabled: vec!["time".to_string(), "http_fetch".to_string()],
         http_fetch: HttpFetchConfig::default(),
+        web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     });
@@ -194,6 +201,7 @@ async fn http_fetch_fetches_allowlisted_host_and_strips_html() {
         http_fetch: HttpFetchConfig {
             allowed_hosts: vec![host.clone()],
         },
+        web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     };
@@ -218,6 +226,7 @@ async fn http_fetch_denies_non_allowlisted_host_without_requesting() {
         http_fetch: HttpFetchConfig {
             allowed_hosts: vec!["example.com".to_string()],
         },
+        web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     };
@@ -260,6 +269,7 @@ async fn http_fetch_reports_upstream_error_status() {
         http_fetch: HttpFetchConfig {
             allowed_hosts: vec![host],
         },
+        web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     };
@@ -280,6 +290,7 @@ async fn weather_spec_surfaces_and_unknown_tool_errors() {
     let cfg = PluginsConfig {
         enabled: vec!["weather".to_string()],
         http_fetch: HttpFetchConfig::default(),
+        web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     };
@@ -324,6 +335,7 @@ async fn weather_round_trip_through_registry_with_test_endpoints() {
     let cfg = PluginsConfig {
         enabled: vec!["weather".to_string()],
         http_fetch: HttpFetchConfig::default(),
+        web_search: WebSearchConfig::default(),
         weather: WeatherConfig {
             default_location: String::new(),
             api_base: api.uri(),
