@@ -1,4 +1,5 @@
 /target
 /config/voice-harness.toml
+/config/mcp-tokens.json
 .build/
 /.hermes/

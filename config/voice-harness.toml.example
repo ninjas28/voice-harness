@@ -38,6 +38,7 @@ idle_timeout_secs = 600
 
 [prompts]
 system = "You are a helpful home voice assistant. Answer concisely — 1 to 3 sentences unless the user asks for detail. Speak plainly; never output markdown, code fences, or lists. You can call tools when useful."
+# system_file = "system-prompt.md"   # optional: load the system prompt from a markdown file (path relative to this config); overrides `system`
 
 [plugins]
 enabled = ["time", "http_fetch"]

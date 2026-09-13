@@ -161,6 +161,11 @@ fn default_idle_timeout_secs() -> u64 {
 pub struct PromptsConfig {
     #[serde(default = "default_system_prompt")]
     pub system: String,
+    /// Optional path to a markdown file whose content replaces `system`.
+    /// Resolved relative to the config file's directory; empty = not used.
+    /// Loaded once at config load; a missing file is a hard error.
+    #[serde(default)]
+    pub system_file: String,
 }
 
 fn default_system_prompt() -> String {
@@ -277,6 +282,7 @@ impl Default for Config {
             },
             prompts: PromptsConfig {
                 system: default_system_prompt(),
+                system_file: String::new(),
             },
             plugins: PluginsConfig {
                 enabled: default_enabled_plugins(),
@@ -321,6 +327,26 @@ impl Config {
         );
 
         let cfg: Config = builder.build()?.try_deserialize()?;
+
+        // `prompts.system_file`: optional markdown file whose content replaces
+        // the inline `prompts.system`. Resolved relative to the config file's
+        // directory (falling back to cwd when no file was loaded); loaded once
+        // at startup. A configured-but-missing file is a hard error so a typo
+        // can never silently drop the real prompt.
+        if !cfg.prompts.system_file.trim().is_empty() {
+            let base = path.and_then(Path::parent).unwrap_or(Path::new("."));
+            let prompt_path = base.join(&cfg.prompts.system_file);
+            let content = std::fs::read_to_string(&prompt_path).map_err(|e| {
+                format!(
+                    "prompts.system_file: cannot read '{}': {e}",
+                    prompt_path.display()
+                )
+            })?;
+            let mut cfg = cfg;
+            cfg.prompts.system = content.trim_end().to_string();
+            return Ok(cfg);
+        }
+
         Ok(cfg)
     }
 
@@ -414,5 +440,62 @@ scopes = ["home.read"]
         assert_eq!(cfg.server.bind, "127.0.0.1:8090");
         assert_eq!(cfg.tts.raw_sample_rate, 16_000);
         assert!(cfg.validate().is_ok(), "example has SET-ME keys filled");
+    }
+
+    #[test]
+    fn system_file_defaults_to_empty() {
+        let cfg = Config::load(None).expect("defaults load");
+        assert_eq!(
+            cfg.prompts.system_file, "",
+            "default keeps the inline [prompts.system] behavior"
+        );
+    }
+
+    #[test]
+    fn system_file_overrides_inline_system_from_toml() {
+        // Temp prompt + config in a dedicated dir (prompt path is resolved
+        // relative to the config file's directory).
+        let dir = std::env::temp_dir().join(format!("vh-prompt-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let prompt_path = dir.join("prompt.md");
+        std::fs::write(&prompt_path, "SPEAK PLAIN.\nBe brief always.").expect("write prompt file");
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+[prompts]
+system = "inline fallback text"
+system_file = "prompt.md"
+"#,
+        )
+        .expect("write config");
+
+        let cfg = Config::load(Some(&cfg_path)).expect("parses");
+        assert_eq!(
+            cfg.prompts.system, "SPEAK PLAIN.\nBe brief always.",
+            "system_file content wins over inline system; trailing newline trimmed"
+        );
+    }
+
+    #[test]
+    fn system_file_missing_reports_the_path() {
+        let dir = std::env::temp_dir().join(format!("vh-prompt-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+[prompts]
+system_file = "does-not-exist.md"
+"#,
+        )
+        .expect("write config");
+
+        let err = Config::load(Some(&cfg_path)).expect_err("missing prompt file must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("prompts.system_file") && msg.contains("does-not-exist.md"),
+            "error must name the config key and the path: {msg}"
+        );
     }
 }

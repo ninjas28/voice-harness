@@ -75,6 +75,18 @@ async fn main() {
             eprintln!("failed to bind {}: {e}", config.server.bind);
             std::process::exit(1);
         });
+    if config.prompts.system_file.trim().is_empty() {
+        tracing::info!(
+            "system prompt: inline ([prompts.system], {} chars)",
+            config.prompts.system.len()
+        );
+    } else {
+        tracing::info!(
+            "system prompt: loaded from {} ({} chars)",
+            config.prompts.system_file,
+            config.prompts.system.len()
+        );
+    }
     tracing::info!("voice-harness listening on http://{}", config.server.bind);
     axum::serve(listener, app)
         .await
