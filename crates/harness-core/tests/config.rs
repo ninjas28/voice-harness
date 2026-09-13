@@ -43,11 +43,7 @@ fn defaults_parse_with_no_file() {
     assert!(cfg.prompts.system.contains("voice assistant"));
     assert_eq!(
         cfg.plugins.enabled,
-        vec![
-            "time".to_string(),
-            "http_fetch".to_string(),
-            "weather".to_string()
-        ]
+        vec!["time".to_string(), "weather".to_string()]
     );
 }
 

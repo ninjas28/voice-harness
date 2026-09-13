@@ -200,9 +200,6 @@ fn default_system_prompt() -> String {
 pub struct PluginsConfig {
     #[serde(default = "default_enabled_plugins")]
     pub enabled: Vec<String>,
-    /// Host allowlist for the `http_fetch` built-in (deny by default).
-    #[serde(default)]
-    pub http_fetch: HttpFetchConfig,
     /// Web search/fetch via self-hosted Firecrawl.
     #[serde(default)]
     pub web_search: WebSearchConfig,
@@ -212,13 +209,6 @@ pub struct PluginsConfig {
     /// MCP servers exposed as tools (Streamable HTTP).
     #[serde(default)]
     pub mcp: McpConfig,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct HttpFetchConfig {
-    /// Hosts `http_fetch` may GET. Empty = deny everything.
-    #[serde(default)]
-    pub allowed_hosts: Vec<String>,
 }
 
 /// `[plugins.web_search]`: web search + page fetch via a self-hosted
@@ -298,11 +288,7 @@ pub struct McpServerConfig {
 }
 
 fn default_enabled_plugins() -> Vec<String> {
-    vec![
-        "time".to_string(),
-        "http_fetch".to_string(),
-        "weather".to_string(),
-    ]
+    vec!["time".to_string(), "weather".to_string()]
 }
 
 impl Default for Config {
@@ -351,7 +337,6 @@ impl Default for Config {
             },
             plugins: PluginsConfig {
                 enabled: default_enabled_plugins(),
-                http_fetch: Default::default(),
                 web_search: Default::default(),
                 weather: Default::default(),
                 mcp: Default::default(),
@@ -548,6 +533,19 @@ api_key = "fc-selfhosted-no-key"
         let cfg = Config::load(Some(&path)).expect("parses");
         assert_eq!(cfg.plugins.web_search.base_url, "http://192.168.10.94:3002");
         assert_eq!(cfg.plugins.web_search.api_key, "fc-selfhosted-no-key");
+    }
+
+    #[test]
+    fn defaults_enable_only_time_and_weather() {
+        let defaults = Config::load(None).expect("defaults load");
+        // Exact list: removal-only default `[time, weather]`; web_search stays
+        // opt-in (it needs [plugins.web_search].base_url to contribute tools).
+        assert_eq!(
+            defaults.plugins.enabled,
+            vec!["time".to_string(), "weather".to_string()],
+            "defaults must enable only time + weather: {:?}",
+            defaults.plugins.enabled
+        );
     }
 
     /// The checked-in example config must always parse against the real

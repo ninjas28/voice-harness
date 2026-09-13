@@ -102,9 +102,6 @@ pub fn registry_from_config(cfg: &PluginsConfig) -> PluginRegistry {
     for name in &cfg.enabled {
         match name.as_str() {
             "time" => registry.register(Box::new(builtin::time::TimePlugin)),
-            "http_fetch" => registry.register(Box::new(builtin::http_fetch::HttpFetchPlugin::new(
-                cfg.http_fetch.allowed_hosts.clone(),
-            ))),
             "web_search" => {
                 if cfg.web_search.base_url.trim().is_empty() {
                     tracing::warn!(

@@ -1,8 +1,6 @@
 //! Integration tests for the plugin registry + built-ins.
 
-use harness_core::config::{
-    HttpFetchConfig, McpConfig, PluginsConfig, WeatherConfig, WebSearchConfig,
-};
+use harness_core::config::{McpConfig, PluginsConfig, WeatherConfig, WebSearchConfig};
 use harness_plugins::builtin::web_search::WebSearchPlugin;
 use harness_plugins::{registry_from_config, Plugin, PluginRegistry};
 use serde_json::{json, Value};
@@ -82,7 +80,6 @@ fn spec_names(registry: &PluginRegistry) -> Vec<String> {
 async fn dispatch_round_trip_and_unknown_tool_error() {
     let cfg = PluginsConfig {
         enabled: vec!["time".to_string()],
-        http_fetch: HttpFetchConfig::default(),
         web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
@@ -118,11 +115,11 @@ async fn dispatch_round_trip_and_unknown_tool_error() {
 #[tokio::test]
 async fn tool_specs_are_concatenated_and_namespaced() {
     let cfg = PluginsConfig {
-        enabled: vec!["time".to_string(), "http_fetch".to_string()],
-        http_fetch: HttpFetchConfig {
-            allowed_hosts: vec!["example.com".to_string()],
+        enabled: vec!["time".to_string(), "web_search".to_string()],
+        web_search: WebSearchConfig {
+            base_url: "http://127.0.0.1:3002".to_string(),
+            api_key: String::new(),
         },
-        web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     };
@@ -130,7 +127,11 @@ async fn tool_specs_are_concatenated_and_namespaced() {
     let names = spec_names(&registry);
     assert_eq!(
         names,
-        vec!["time.get_time".to_string(), "http_fetch.fetch".to_string(),]
+        vec![
+            "time.get_time".to_string(),
+            "web_search.search".to_string(),
+            "web_search.fetch".to_string()
+        ]
     );
     // Specs are valid OpenAI function specs.
     for spec in registry.tool_specs() {
@@ -143,7 +144,6 @@ async fn tool_specs_are_concatenated_and_namespaced() {
 async fn registry_from_config_honors_enabled_list() {
     let cfg = PluginsConfig {
         enabled: vec!["time".to_string()],
-        http_fetch: HttpFetchConfig::default(),
         web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
@@ -152,145 +152,37 @@ async fn registry_from_config_honors_enabled_list() {
     let names = spec_names(&registry);
     assert_eq!(names, vec!["time.get_time".to_string()]);
     assert!(
-        !names.iter().any(|n| n.starts_with("http_fetch")),
+        !names.iter().any(|n| n.starts_with("web_search")),
         "disabled plugin must not contribute specs: {names:?}"
     );
 
     // Empty enabled list → empty registry.
     let empty = registry_from_config(&PluginsConfig {
         enabled: vec![],
-        http_fetch: HttpFetchConfig::default(),
         web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     });
     assert!(spec_names(&empty).is_empty());
 
-    // Explicitly both built-ins enabled → two specs.
+    // Explicitly both built-ins enabled → three specs (web_search has two
+    // tools: search + fetch).
     let both = registry_from_config(&PluginsConfig {
-        enabled: vec!["time".to_string(), "http_fetch".to_string()],
-        http_fetch: HttpFetchConfig::default(),
-        web_search: WebSearchConfig::default(),
+        enabled: vec!["time".to_string(), "web_search".to_string()],
+        web_search: WebSearchConfig {
+            base_url: "http://127.0.0.1:3002".to_string(),
+            api_key: String::new(),
+        },
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
     });
-    assert_eq!(spec_names(&both).len(), 2);
-}
-
-#[tokio::test]
-async fn http_fetch_fetches_allowlisted_host_and_strips_html() {
-    let server = wiremock::MockServer::start().await;
-    // MockServer binds 127.0.0.1:<random port>; allowlist the host without port.
-    let host = server
-        .uri()
-        .trim_start_matches("http://")
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    wiremock::Mock::given(wiremock::matchers::method("GET"))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200)
-                .insert_header("content-type", "text/html")
-                .set_body_string("<html><body><h1>Hi</h1><p>Fetched ok</p></body></html>"),
-        )
-        .mount(&server)
-        .await;
-
-    let cfg = PluginsConfig {
-        enabled: vec!["http_fetch".to_string()],
-        http_fetch: HttpFetchConfig {
-            allowed_hosts: vec![host.clone()],
-        },
-        web_search: WebSearchConfig::default(),
-        weather: WeatherConfig::default(),
-        mcp: McpConfig::default(),
-    };
-    let registry = registry_from_config(&cfg);
-    let out = registry
-        .dispatch(
-            "http_fetch.fetch",
-            json!({ "url": format!("{}/page", server.uri()) }),
-        )
-        .await
-        .expect("fetch ok");
-    assert_eq!(out["status"], 200);
-    assert_eq!(out["body"], "Hi Fetched ok");
-}
-
-#[tokio::test]
-async fn http_fetch_denies_non_allowlisted_host_without_requesting() {
-    let server = wiremock::MockServer::start().await;
-    // No mocks: a request would 404. The deny must happen before any I/O.
-    let cfg = PluginsConfig {
-        enabled: vec!["http_fetch".to_string()],
-        http_fetch: HttpFetchConfig {
-            allowed_hosts: vec!["example.com".to_string()],
-        },
-        web_search: WebSearchConfig::default(),
-        weather: WeatherConfig::default(),
-        mcp: McpConfig::default(),
-    };
-    let registry = registry_from_config(&cfg);
-    let err = registry
-        .dispatch(
-            "http_fetch.fetch",
-            json!({ "url": format!("{}/steal", server.uri()) }),
-        )
-        .await
-        .expect_err("must deny");
-    assert!(err.contains("not on the http_fetch allowlist"), "{err}");
-    assert!(
-        server
-            .received_requests()
-            .await
-            .expect("received requests")
-            .is_empty(),
-        "denied host must not be contacted"
-    );
-}
-
-#[tokio::test]
-async fn http_fetch_reports_upstream_error_status() {
-    let server = wiremock::MockServer::start().await;
-    let host = server
-        .uri()
-        .trim_start_matches("http://")
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    wiremock::Mock::given(wiremock::matchers::method("GET"))
-        .respond_with(wiremock::ResponseTemplate::new(500).set_body_string("boom"))
-        .mount(&server)
-        .await;
-
-    let cfg = PluginsConfig {
-        enabled: vec!["http_fetch".to_string()],
-        http_fetch: HttpFetchConfig {
-            allowed_hosts: vec![host],
-        },
-        web_search: WebSearchConfig::default(),
-        weather: WeatherConfig::default(),
-        mcp: McpConfig::default(),
-    };
-    let registry = registry_from_config(&cfg);
-    // 5xx still returns a result object with the status — the LLM decides.
-    let out = registry
-        .dispatch(
-            "http_fetch.fetch",
-            json!({ "url": format!("{}/down", server.uri()) }),
-        )
-        .await
-        .expect("result object");
-    assert_eq!(out["status"], 500);
+    assert_eq!(spec_names(&both).len(), 3);
 }
 
 #[tokio::test]
 async fn weather_spec_surfaces_and_unknown_tool_errors() {
     let cfg = PluginsConfig {
         enabled: vec!["weather".to_string()],
-        http_fetch: HttpFetchConfig::default(),
         web_search: WebSearchConfig::default(),
         weather: WeatherConfig::default(),
         mcp: McpConfig::default(),
@@ -335,7 +227,6 @@ async fn weather_round_trip_through_registry_with_test_endpoints() {
 
     let cfg = PluginsConfig {
         enabled: vec!["weather".to_string()],
-        http_fetch: HttpFetchConfig::default(),
         web_search: WebSearchConfig::default(),
         weather: WeatherConfig {
             default_location: String::new(),

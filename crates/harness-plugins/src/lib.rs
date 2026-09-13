@@ -1,4 +1,4 @@
-//! harness-plugins: plugin trait, registry, built-in plugins (time, weather, http_fetch).
+//! harness-plugins: plugin trait, registry, built-in plugins (time, weather, web_search).
 //!
 //! Plugins supply OpenAI-style tool specs and handlers; the registry
 //! namespaces tool names as `<plugin>.<tool>` so specs can be concatenated
