@@ -7,10 +7,8 @@ use serde_json::{json, Value};
 use crate::{Plugin, PluginManifest};
 
 /// Official forecast endpoint (overridable via `[plugins.weather].api_base`).
-#[allow(dead_code)] // consumed by `fetch_forecast` (used via `call`, Task 6)
 const DEFAULT_FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
 /// Official geocoding endpoint (overridable via `[plugins.weather].geocoding_base`).
-#[allow(dead_code)] // consumed by the geocoding request (later task)
 const DEFAULT_GEOCODE_URL: &str = "https://geocoding-api.open-meteo.com/v1/search";
 /// Request timeout per upstream call (plan).
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -22,8 +20,7 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 pub struct WeatherPlugin {
     api_base: String,
     geocoding_base: String,
-    /// Location used when the LLM omits one (read by `call`, later task).
-    #[allow(dead_code)]
+    /// Location used when the LLM omits one.
     default_location: String,
 }
 
@@ -45,7 +42,6 @@ impl WeatherPlugin {
     }
 
     /// Endpoint override: forecast URL. Empty = official URL.
-    #[allow(dead_code)] // consumed by `fetch_forecast` (used via `call`, Task 6)
     fn forecast_url(&self) -> String {
         if self.api_base.trim().is_empty() {
             DEFAULT_FORECAST_URL.to_string()
@@ -64,7 +60,6 @@ impl WeatherPlugin {
 
     /// Resolve a location string against the Geocoding API, returning the
     /// first match's coordinates and labels.
-    #[allow(dead_code)] // consumed by `call` orchestration (Task 6)
     async fn geocode(&self, location: &str) -> Result<GeoResult, String> {
         let client = reqwest::Client::builder()
             .timeout(TIMEOUT)
@@ -142,7 +137,6 @@ impl WeatherPlugin {
     }
 
     /// Request current conditions + daily forecast for geocoded coordinates.
-    #[allow(dead_code)] // consumed by `call` orchestration (Task 6)
     async fn fetch_forecast(
         &self,
         geo: &GeoResult,
@@ -206,7 +200,6 @@ impl WeatherPlugin {
 }
 
 /// Shape the Open-Meteo forecast response into the compact LLM-facing JSON.
-#[allow(dead_code)] // consumed by `fetch_forecast` (used via `call`, Task 6)
 fn shape_forecast(geo: &GeoResult, body: &Value, units: Units) -> Value {
     let (temp_name, wind_name, precip_name) = match units {
         Units::Metric => ("degrees Celsius", "kilometers per hour", "millimeters"),
@@ -271,7 +264,6 @@ fn shape_forecast(geo: &GeoResult, body: &Value, units: Units) -> Value {
 
 /// One geocoded place (first Open-Meteo search result).
 #[derive(Debug)]
-#[allow(dead_code)] // consumed by the forecast fetch (Task 5)
 struct GeoResult {
     name: String,
     admin1: Option<String>,
@@ -283,13 +275,11 @@ struct GeoResult {
 
 /// Unit system for the forecast request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by the forecast fetch (later task)
 enum Units {
     Metric,
     Imperial,
 }
 
-#[allow(dead_code)] // consumed by `call` argument parsing (later task)
 fn units_from(arg: &str) -> Units {
     if arg.eq_ignore_ascii_case("imperial") {
         Units::Imperial
@@ -298,20 +288,17 @@ fn units_from(arg: &str) -> Units {
     }
 }
 
-#[allow(dead_code)] // consumed by `call` argument parsing (later task)
 fn units_from_none(arg: Option<&str>) -> Units {
     arg.map(units_from).unwrap_or(Units::Metric)
 }
 
 /// Forecast days including today, clamped to the API's 1..=7 range.
-#[allow(dead_code)] // consumed by `call` argument parsing (later task)
 fn clamp_days(arg: Option<u64>) -> u32 {
     arg.unwrap_or(1).clamp(1, 7) as u32
 }
 
 /// WMO weather interpretation code → short speakable description
 /// (per Open-Meteo docs, "Weather variable documentation").
-#[allow(dead_code)] // consumed by forecast shaping (later task)
 fn wmo_description(code: i64) -> &'static str {
     match code {
         0 => "Clear sky",
@@ -376,11 +363,34 @@ impl Plugin for WeatherPlugin {
         })]
     }
 
-    async fn call(&self, name: &str, _arguments: Value) -> Result<Value, String> {
+    async fn call(&self, name: &str, arguments: Value) -> Result<Value, String> {
         if name != "get_forecast" {
             return Err(format!("weather plugin has no tool '{name}'"));
         }
-        Err("weather lookup not implemented yet".to_string())
+        let location = arguments
+            .get("location")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                let default = self.default_location.trim();
+                if default.is_empty() {
+                    None
+                } else {
+                    Some(default.to_string())
+                }
+            });
+        let Some(location) = location else {
+            return Err("no location given and no default location is configured; \
+                 ask the user which place they want weather for"
+                .to_string());
+        };
+        let days = clamp_days(arguments.get("days").and_then(Value::as_u64));
+        let units = units_from_none(arguments.get("units").and_then(Value::as_str));
+
+        let geo = self.geocode(&location).await?;
+        self.fetch_forecast(&geo, days, units).await
     }
 }
 
@@ -564,5 +574,70 @@ mod tests {
             .await
             .expect_err("must fail");
         assert!(err.contains("Latitude must be"), "{err}");
+    }
+
+    /// Both wiremock servers: geocode + forecast.
+    async fn setup_mock_pair() -> (wiremock::MockServer, wiremock::MockServer) {
+        let geo = wiremock::MockServer::start().await;
+        let api = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(GEOCODE_HIT))
+            .mount(&geo)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(FORECAST_JSON))
+            .mount(&api)
+            .await;
+        (geo, api)
+    }
+
+    #[tokio::test]
+    async fn call_end_to_end_with_location() {
+        let (geo, api) = setup_mock_pair().await;
+        let p = WeatherPlugin::new(String::new()).with_endpoints(api.uri(), geo.uri());
+        let out = p
+            .call("get_forecast", json!({ "location": "Paris", "days": 2 }))
+            .await
+            .expect("ok");
+        assert_eq!(out["location"]["name"], "Paris");
+        assert_eq!(out["current"]["temperature"], 22.4);
+    }
+
+    #[tokio::test]
+    async fn call_without_location_uses_default_location() {
+        let (geo, api) = setup_mock_pair().await;
+        let p = WeatherPlugin::new("Paris".to_string()).with_endpoints(api.uri(), geo.uri());
+        let out = p.call("get_forecast", json!({})).await.expect("ok");
+        assert_eq!(out["location"]["name"], "Paris");
+        // The geocoder must have received the default location.
+        let requests = geo.received_requests().await.expect("requests");
+        let url = requests[0].url.to_string();
+        assert!(url.contains("name=Paris"), "{url}");
+    }
+
+    #[tokio::test]
+    async fn call_without_location_or_default_is_a_recoverable_error() {
+        let (geo, api) = setup_mock_pair().await;
+        let p = WeatherPlugin::new(String::new()).with_endpoints(api.uri(), geo.uri());
+        let err = p
+            .call("get_forecast", json!({}))
+            .await
+            .expect_err("must fail");
+        assert!(err.contains("no location") && err.contains("ask"), "{err}");
+        // Neither upstream may have been contacted.
+        assert!(geo.received_requests().await.expect("geo").is_empty());
+        assert!(api.received_requests().await.expect("api").is_empty());
+    }
+
+    #[tokio::test]
+    async fn call_days_out_of_range_is_clamped() {
+        let (geo, api) = setup_mock_pair().await;
+        let p = WeatherPlugin::new(String::new()).with_endpoints(api.uri(), geo.uri());
+        p.call("get_forecast", json!({ "location": "Paris", "days": 99 }))
+            .await
+            .expect("ok");
+        let requests = api.received_requests().await.expect("requests");
+        let url = requests[0].url.to_string();
+        assert!(url.contains("forecast_days=7"), "{url}");
     }
 }
