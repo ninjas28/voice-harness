@@ -59,7 +59,7 @@ enabled = ["time", "web_search", "weather"]
 # Tools surface as web_search.search / web_search.fetch. Requires base_url;
 # without it an enabled web_search plugin contributes no tools.
 # [plugins.web_search]
-# base_url = "http://192.168.10.94:3002"
+# base_url = "http://127.0.0.1:3002"
 # api_key = ""                             # only for cloud Firecrawl
 
 # Optional weather plugin tuning (Open-Meteo, keyless). Defaults omitted =
