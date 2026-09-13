@@ -15,12 +15,13 @@ use axum::extract::State;
 use axum::response::Response;
 use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
+use harness_core::sentence::{ends_sentence, join_transcripts};
 use harness_core::types::{ClientMsg, ServerMsg, SessionState};
 use harness_core::vad::{Utterance, UtteranceAssembler, VadPolicy, WebrtcVad};
 use tokio::sync::mpsc;
 
 use crate::http::RouterDeps;
-use crate::orchestrator::{run_audio_utterance, Deps};
+use crate::orchestrator::{run_text_turn, Deps};
 use crate::state::SessionStore;
 
 /// Write-channel bound per connection. The pipeline's own sends are awaited,
@@ -89,27 +90,44 @@ pub async fn handle_socket(socket: WebSocket, session: WsState) {
     let idle = std::time::Duration::from_secs(session.config.session.idle_timeout_secs);
 
     // Read loop: idle timeout on every receive. Ends on close frame, idle
-    // timeout, socket error, or a clean `session.stop`.
+    // timeout, socket error, or a clean `session.stop`. While a held
+    // (sentence-incomplete) transcript waits for its continuation, a flush
+    // deadline joins the select: expiring dispatches the held text as a turn.
     loop {
-        let incoming = tokio::time::timeout(idle, ws_rx.next()).await;
-        let Ok(Some(msg)) = incoming else {
-            break;
-        };
-        let msg = match msg {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::debug!("ws read error: {e}");
-                break;
-            }
-        };
-        match msg {
-            Message::Text(text) => {
-                if conn.on_text(&text).await {
-                    break; // session.stop: clean disconnect
+        tokio::select! {
+            incoming = tokio::time::timeout(idle, ws_rx.next()) => {
+                let Ok(Some(msg)) = incoming else {
+                    break;
+                };
+                let msg = match msg {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::debug!("ws read error: {e}");
+                        break;
+                    }
+                };
+                match msg {
+                    Message::Text(text) => {
+                        if conn.on_text(&text).await {
+                            break; // session.stop: clean disconnect
+                        }
+                    }
+                    Message::Close(_) => break,
+                    Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {}
                 }
             }
-            Message::Close(_) => break,
-            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {}
+            _ = async {
+                match conn.hold_deadline().await {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                // The wait elapsed with no new speech: dispatch the held
+                // transcript so a punctuation-free command can't hang.
+                if conn.flush_held().await {
+                    break;
+                }
+            }
         }
     }
 
@@ -132,6 +150,12 @@ struct ConnState {
     session_id: Option<String>,
     /// In-flight turn task; aborted by session.stop / new session.start.
     turn: Option<tokio::task::JoinHandle<()>>,
+    /// Sentence-end gate: transcript finalized but not yet sentence-terminal,
+    /// waiting for the next utterance (or the flush deadline). Empty = none.
+    held_transcript: String,
+    /// When the held transcript dispatches even without punctuation (a tokio
+    /// Instant is only meaningful when `held_transcript` is non-empty).
+    hold_deadline: Option<tokio::time::Instant>,
 }
 
 impl ConnState {
@@ -147,6 +171,8 @@ impl ConnState {
             assembler: None,
             session_id: None,
             turn: None,
+            held_transcript: String::new(),
+            hold_deadline: None,
         }
     }
 
@@ -174,6 +200,10 @@ impl ConnState {
                 self.abort_turn();
                 self.assembler = Some(self.new_assembler());
                 self.session_id = Some(device_id.unwrap_or_else(next_session_id));
+                // New session = fresh conversation; any held fragment is
+                // stale (its device has moved on).
+                self.held_transcript.clear();
+                self.hold_deadline = None;
                 self.send_state(SessionState::Listening).await;
             }
             ClientMsg::AudioData { pcm } => {
@@ -206,14 +236,19 @@ impl ConnState {
                 let result = self.feed_audio(&mut assembler, &samples).await;
                 self.assembler = Some(assembler);
                 for utt in result.utterances {
-                    self.spawn_turn(utt);
+                    self.ingest_utterance(utt).await;
                 }
             }
             ClientMsg::SpeechEnd => {
                 if let Some(assembler) = self.assembler.as_mut() {
                     if let Some(utt) = assembler.force_end() {
                         self.send_state(SessionState::Listening).await;
-                        self.spawn_turn(utt);
+                        self.ingest_utterance(utt).await;
+                    } else if !self.held_transcript.is_empty() {
+                        // No utterance open, but a held fragment is waiting:
+                        // the user (or client logic) says "that's all" —
+                        // dispatch it now, don't wait out the timer.
+                        self.flush_held().await;
                     }
                 }
             }
@@ -221,6 +256,8 @@ impl ConnState {
                 self.abort_turn();
                 self.assembler = None;
                 self.session_id = None;
+                self.held_transcript.clear();
+                self.hold_deadline = None;
                 return true; // clean disconnect
             }
         }
@@ -252,13 +289,102 @@ impl ConnState {
         FeedResult { utterances }
     }
 
-    /// Start the turn pipeline on an abortable task. The task owns the
-    /// orchestrator deps and the session lock; events flow out via `out`.
-    fn spawn_turn(&mut self, utt: Utterance) {
+    /// Transcribe one finalized utterance and apply the sentence-end gate.
+    ///
+    /// The transcript is always forwarded to the client immediately. With
+    /// `session.require_sentence_end` on, a transcript that does not end
+    /// sentence-terminal (`. ! ? …`) is treated as a mid-sentence VAD pause:
+    /// it is concatenated onto any previously held fragment and held with a
+    /// flush deadline instead of dispatching. A sentence-terminal transcript
+    /// dispatches the whole accumulated text as one turn.
+    async fn ingest_utterance(&mut self, utt: Utterance) {
+        let deps = (self.deps_factory)();
+        let text = match deps.stt.transcribe(&utt.pcm).await {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = self
+                    .out
+                    .send(ServerMsg::Error {
+                        code: "stt".into(),
+                        message: e.to_string(),
+                    })
+                    .await;
+                return;
+            }
+        };
+        let _ = self
+            .out
+            .send(ServerMsg::Transcript { text: text.clone() })
+            .await;
+        if text.trim().is_empty() {
+            return; // silent audio / STT found nothing: nothing to hold
+        }
+        if !self.config.session.require_sentence_end || ends_sentence(&text) {
+            // Sentence complete (or the gate is off): dispatch everything.
+            let held = std::mem::take(&mut self.held_transcript);
+            self.hold_deadline = None;
+            let full = join_transcripts(&held, &text);
+            if full != text {
+                // The fragment already echoed itself when it was held; send
+                // the joined view so the client's transcript shows the whole
+                // sentence, then dispatch.
+                let _ = self
+                    .out
+                    .send(ServerMsg::Transcript { text: full.clone() })
+                    .await;
+            }
+            self.dispatch_turn(&full);
+            return;
+        }
+        // Mid-sentence fragment: hold it and arm the flush deadline so a
+        // complete command can never hang forever if no continuation comes.
+        self.held_transcript = join_transcripts(&self.held_transcript, &text);
+        self.hold_deadline = Some(
+            tokio::time::Instant::now()
+                + std::time::Duration::from_millis(self.config.session.sentence_end_wait_ms),
+        );
+        tracing::debug!(held = %self.held_transcript, "sentence gate: holding fragment");
+    }
+
+    /// The flush deadline the read loop's select should await, if any. While
+    /// the VAD has an utterance open (speech in progress) the deadline is
+    /// deferred — the timer flushes silence, it must not cut off the
+    /// continuation of the very sentence it is holding.
+    async fn hold_deadline(&self) -> Option<tokio::time::Instant> {
+        if self.held_transcript.is_empty() {
+            return None;
+        }
+        let speech_open = self.assembler.as_ref().is_some_and(|a| a.is_active());
+        if speech_open {
+            None
+        } else {
+            self.hold_deadline
+        }
+    }
+
+    /// Dispatch the held transcript now (flush deadline expired, or an
+    /// explicit `speech.end`). Returns `true` to end the connection — never,
+    /// mirroring the `on_text` contract.
+    async fn flush_held(&mut self) -> bool {
+        if self.held_transcript.trim().is_empty() {
+            self.hold_deadline = None;
+            return false;
+        }
+        let text = std::mem::take(&mut self.held_transcript);
+        self.hold_deadline = None;
+        self.dispatch_turn(&text);
+        false
+    }
+
+    /// Start the turn pipeline on an abortable task for a final (possibly
+    /// accumulated) user text. The task owns the orchestrator deps and the
+    /// session lock; events flow out via `out`.
+    fn dispatch_turn(&mut self, text: &str) {
         let deps = (self.deps_factory)();
         let out = self.out.clone();
         let session_id = self.session_id.clone().unwrap_or_else(next_session_id);
         let store = self.sessions.clone();
+        let text = text.to_string();
         let turn = tokio::spawn(async move {
             let session = store.get(session_id).await;
             let mut session = session.write().await;
@@ -268,7 +394,7 @@ impl ConnState {
                     state: SessionState::Thinking,
                 })
                 .await;
-            if let Err(e) = run_audio_utterance(&deps, &mut session, &utt.pcm, out.clone()).await {
+            if let Err(e) = run_text_turn(&deps, &mut session, &text, out.clone()).await {
                 let _ = out
                     .send(ServerMsg::Error {
                         code: "turn".into(),

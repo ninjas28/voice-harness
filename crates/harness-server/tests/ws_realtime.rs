@@ -2,7 +2,9 @@
 //! with wiremock upstreams. Full VAD turn, speech.end shortcut, malformed
 //! input resilience. Every receive is timeout-wrapped.
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -29,6 +31,7 @@ type Ws = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStrea
 
 struct MockLlm {
     url: String,
+    requests: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -37,6 +40,7 @@ impl LlmProvider for MockLlm {
         &self,
         req: ChatRequest,
     ) -> Result<ChatStream, harness_core::error::HarnessError> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
         let client = harness_providers::llm::OpenAiLlmClient::new(
             self.url.clone(),
             "/v1/chat/completions",
@@ -65,23 +69,23 @@ impl TtsProvider for MockTts {
     }
 }
 
-struct MockStt {
-    url: String,
+/// Consecutive transcripts for STT calls (script of one = reused). Script
+/// consumption is serialized through the wiremock responder's mutex.
+struct ScriptedStt {
+    queue: Mutex<VecDeque<String>>,
 }
 
 #[async_trait]
-impl SttProvider for MockStt {
+impl SttProvider for ScriptedStt {
     async fn transcribe(
         &self,
-        pcm16k: &[i16],
+        _pcm16k: &[i16],
     ) -> Result<String, harness_core::error::HarnessError> {
-        let client = harness_providers::stt::OpenAiSttClient::new(
-            self.url.clone(),
-            "/v1/audio/transcriptions",
-            "test-stt-key",
-            "asr-model",
-        );
-        client.transcribe(pcm16k).await
+        let mut q = self.queue.lock().unwrap();
+        if q.len() == 1 {
+            return Ok(q[0].clone());
+        }
+        Ok(q.pop_front().unwrap_or_default())
     }
 }
 
@@ -147,15 +151,24 @@ fn audio_msg(pcm: &[i16]) -> String {
     .to_string()
 }
 
-/// One axum server + three wiremock upstreams.
-async fn spawn_server_with_keys(api_keys: Vec<String>) -> (String, Config) {
+/// One axum server + three wiremock upstreams. `transcripts` are the
+/// consecutive STT results (last one repeats); `customize` mutates the config
+/// before the router is built (session knobs, keys…).
+async fn spawn_server(
+    mut config: Config,
+    transcripts: Vec<String>,
+    customize: impl FnOnce(&mut Config),
+) -> (String, Arc<AtomicUsize>) {
     let llm = MockServer::start().await;
+    let llm_requests = Arc::new(AtomicUsize::new(0));
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(llm_sse(&[
-            "The quick brown fox jumps over the lazy dog. ",
-            "Then it wandered off to nap under the old oak tree.",
-        ])))
+        .respond_with(|_req: &wiremock::Request| {
+            ResponseTemplate::new(200).set_body_string(llm_sse(&[
+                "The quick brown fox jumps over the lazy dog. ",
+                "Then it wandered off to nap under the old oak tree.",
+            ]))
+        })
         .mount(&llm)
         .await;
 
@@ -168,23 +181,33 @@ async fn spawn_server_with_keys(api_keys: Vec<String>) -> (String, Config) {
         .mount(&tts)
         .await;
 
+    // STT is scripted in-process by ScriptedStt below — the wiremock endpoint
+    // only exists so the router has a URL to point at; it is never called.
+    let mut queue: VecDeque<String> = transcripts.into_iter().collect();
+    if queue.is_empty() {
+        queue.push_back("what time is it".to_string());
+    }
     let stt = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({ "text": "what time is it" })),
+                .set_body_json(serde_json::json!({ "text": "wiremock-stt-unused" })),
         )
         .mount(&stt)
         .await;
 
-    let mut config = Config::default();
-    config.server.api_keys = api_keys;
+    customize(&mut config);
     let deps = RouterDeps {
         config: config.clone(),
-        llm: Arc::new(MockLlm { url: llm.uri() }),
+        llm: Arc::new(MockLlm {
+            url: llm.uri(),
+            requests: llm_requests.clone(),
+        }),
         tts: Arc::new(MockTts { url: tts.uri() }),
-        stt: Arc::new(MockStt { url: stt.uri() }),
+        stt: Arc::new(ScriptedStt {
+            queue: Mutex::new(queue),
+        }),
         plugins: Arc::new(PluginRegistry::new()),
         sessions: Arc::new(SessionStore::new()),
     };
@@ -195,7 +218,14 @@ async fn spawn_server_with_keys(api_keys: Vec<String>) -> (String, Config) {
         axum::serve(listener, app).await.unwrap();
     });
 
-    (format!("ws://{addr}/v1/realtime"), config)
+    (format!("ws://{addr}/v1/realtime"), llm_requests)
+}
+
+async fn spawn_server_with_keys(api_keys: Vec<String>) -> (String, Config) {
+    let mut config = Config::default();
+    config.server.api_keys = api_keys;
+    let (url, _) = spawn_server(config.clone(), Vec::new(), |_| {}).await;
+    (url, config)
 }
 
 /// Send one text frame.
@@ -466,4 +496,250 @@ async fn auth_required_when_keys_configured() {
         .expect("bearer auth accepted")
         .0;
     drop(ws);
+}
+
+// ------------------------------------------------- sentence-end transcript gate
+
+/// Speech then silence, in frames (30 ms each).
+async fn speak_then_pause(ws: &mut Ws, speech_frames: usize, silence_frames: usize) {
+    for _ in 0..speech_frames {
+        send_text(ws, audio_msg(&speech_frame())).await;
+    }
+    for _ in 0..silence_frames {
+        send_text(ws, audio_msg(&silence_frame())).await;
+    }
+}
+
+/// A VAD-finalized utterance whose transcript lacks terminal punctuation is
+/// transcribed and shown to the client, but no turn starts and the LLM is
+/// not called (long wait so the flush timer cannot fire within the window).
+#[tokio::test]
+async fn nonterminal_transcript_is_held_no_llm_call() {
+    let (url, llm_requests) = spawn_server(
+        Config::default(),
+        vec!["can you look up uh".to_string()],
+        |cfg| cfg.session.sentence_end_wait_ms = 60_000,
+    )
+    .await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+
+    // ~0.6 s speech + ~1 s silence → endpoint fires, STT runs, gate holds.
+    speak_then_pause(&mut ws, 20, 33).await;
+
+    // Well past any plausible dispatch latency: nothing may arrive.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    while tokio::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(100), ws.next()).await {
+            Ok(Some(Ok(Message::Text(t)))) => {
+                let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                assert_ne!(
+                    type_of(&v),
+                    "turn.completed",
+                    "held fragment must not dispatch: {v}"
+                );
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(
+        llm_requests.load(Ordering::SeqCst),
+        0,
+        "nonterminal fragment must not reach the LLM"
+    );
+}
+
+/// The next utterance's transcript is concatenated onto the held fragment and
+/// the whole sentence dispatches as ONE turn when it ends terminal.
+#[tokio::test]
+async fn continuation_concatenates_and_dispatches_once() {
+    let (url, llm_requests) = spawn_server(
+        Config::default(),
+        vec![
+            "can you look up uh".to_string(),
+            "the weather for tomorrow?".to_string(),
+        ],
+        |_| {},
+    )
+    .await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+
+    // Fragment 1: speech + silence → held (client sees its echo).
+    speak_then_pause(&mut ws, 20, 33).await;
+    // Fragment 2: arrives before the wait timer (2 s) elapses.
+    speak_then_pause(&mut ws, 20, 33).await;
+
+    let mut saw_transcript = false;
+    let mut saw_completed = false;
+    loop {
+        let v = recv_json(&mut ws).await;
+        match type_of(&v) {
+            "transcript" => {
+                // Two transcript echoes arrive (the fragment's own echo, then
+                // the concatenated final); only the final one must be whole.
+                if v["text"] == "can you look up uh the weather for tomorrow?" {
+                    saw_transcript = true;
+                }
+            }
+            "turn.completed" => {
+                assert!(!saw_completed, "only one turn for both fragments");
+                saw_completed = true;
+                break;
+            }
+            "error" => panic!("unexpected error frame: {v}"),
+            _ => {}
+        }
+    }
+    assert!(
+        saw_transcript && saw_completed,
+        "single concatenated turn (final transcript must precede completion)"
+    );
+    assert_eq!(
+        llm_requests.load(Ordering::SeqCst),
+        1,
+        "exactly one LLM round for the two fragments"
+    );
+}
+
+/// A held fragment dispatches anyway after `sentence_end_wait_ms` of silence,
+/// so a complete command without punctuation can never hang the session.
+#[tokio::test]
+async fn held_fragment_dispatches_after_wait_timeout() {
+    let (url, llm_requests) = spawn_server(
+        Config::default(),
+        vec!["can you look up the weather".to_string()],
+        |cfg| {
+            cfg.session.sentence_end_wait_ms = 500;
+        },
+    )
+    .await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+
+    speak_then_pause(&mut ws, 20, 33).await;
+
+    // Endpoint fires → hold → 500 ms later the wait dispatches the turn.
+    let start = tokio::time::Instant::now();
+    loop {
+        let v = recv_json(&mut ws).await;
+        match type_of(&v) {
+            "turn.completed" => break,
+            "error" => panic!("unexpected error frame: {v}"),
+            _ => {}
+        }
+    }
+    assert!(
+        start.elapsed() >= Duration::from_millis(450),
+        "dispatch happened suspiciously early — fragment may not have been held"
+    );
+    assert_eq!(llm_requests.load(Ordering::SeqCst), 1);
+}
+
+/// An explicit `speech.end` with no open utterance flushes a held fragment
+/// immediately — the client says "that's all", no timer wait.
+#[tokio::test]
+async fn speech_end_flushes_held_fragment() {
+    let (url, llm_requests) = spawn_server(
+        Config::default(),
+        vec!["can you look up the weather".to_string()],
+        |cfg| cfg.session.sentence_end_wait_ms = 60_000,
+    )
+    .await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+
+    speak_then_pause(&mut ws, 20, 33).await;
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "speech.end" }).to_string(),
+    )
+    .await;
+
+    loop {
+        let v = recv_json(&mut ws).await;
+        match type_of(&v) {
+            "turn.completed" => break,
+            "error" => panic!("unexpected error frame: {v}"),
+            _ => {}
+        }
+    }
+    assert_eq!(llm_requests.load(Ordering::SeqCst), 1);
+}
+
+/// The flush deadline is deferred while the VAD has an utterance open: a long
+/// continuation must not be cut off by the timer mid-speech. If the timer
+/// fired during the speech run, the two fragments would dispatch separately
+/// (2 LLM calls); deferral keeps it at exactly one joined turn.
+#[tokio::test]
+async fn wait_timer_defers_while_speech_is_open() {
+    let (url, llm_requests) = spawn_server(
+        Config::default(),
+        vec![
+            "can you look up uh".to_string(),
+            "the weather for tomorrow?".to_string(),
+        ],
+        |cfg| {
+            cfg.session.sentence_end_wait_ms = 500;
+        },
+    )
+    .await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+
+    // Fragment 1 held; 500 ms timer armed.
+    speak_then_pause(&mut ws, 20, 33).await;
+    // 1.5 s of continuous speech (> 500 ms): timer must defer throughout.
+    for _ in 0..50 {
+        send_text(&mut ws, audio_msg(&speech_frame())).await;
+    }
+    // Then silence endpoints utterance 2 → joined dispatch.
+    for _ in 0..33 {
+        send_text(&mut ws, audio_msg(&silence_frame())).await;
+    }
+
+    let mut saw_joined_transcript = false;
+    loop {
+        let v = recv_json(&mut ws).await;
+        match type_of(&v) {
+            "transcript" => {
+                if v["text"] == "can you look up uh the weather for tomorrow?" {
+                    saw_joined_transcript = true;
+                }
+            }
+            "turn.completed" => break,
+            "error" => panic!("unexpected error frame: {v}"),
+            _ => {}
+        }
+    }
+    assert!(
+        saw_joined_transcript,
+        "deferral must produce one joined turn"
+    );
+    assert_eq!(
+        llm_requests.load(Ordering::SeqCst),
+        1,
+        "timer firing mid-speech would dispatch the fragments separately"
+    );
 }
