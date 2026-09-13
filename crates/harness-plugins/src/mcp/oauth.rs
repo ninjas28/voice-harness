@@ -147,6 +147,8 @@ pub struct TokenResponse {
 
 /// Discovery + token request timeout.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Hard bound on waiting for the user to finish the browser flow.
+const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn origin_of(url: &str) -> Result<String, String> {
     let rest = url
@@ -384,6 +386,132 @@ pub async fn register_client(
 
 fn truncate(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
+}
+
+/// One-shot loopback HTTP listener capturing the OAuth redirect (RFC 8252 §7).
+pub struct AuthorizationListener {
+    listener: tokio::net::TcpListener,
+    redirect_uri: String,
+}
+
+impl AuthorizationListener {
+    /// Bind `127.0.0.1:<ephemeral>`; the redirect URI is
+    /// `http://127.0.0.1:<port>/callback`.
+    pub async fn bind() -> Result<Self, String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("bind loopback listener: {e}"))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| format!("local addr: {e}"))?
+            .port();
+        Ok(Self {
+            listener,
+            redirect_uri: format!("http://127.0.0.1:{port}/callback"),
+        })
+    }
+
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    /// Wait (≤300 s, hard-bounded) for the browser redirect; verify `state`;
+    /// return the percent-decoded code.
+    pub async fn wait_code(&self, expected_state: &str) -> Result<String, String> {
+        let fut = async {
+            let (mut sock, _) = self
+                .listener
+                .accept()
+                .await
+                .map_err(|e| format!("accept: {e}"))?;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            // Read the request head (request line + headers).
+            loop {
+                let n = sock
+                    .read(&mut chunk)
+                    .await
+                    .map_err(|e| format!("read: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 16 * 1024 {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&buf);
+            let request_line = head.lines().next().unwrap_or_default();
+            // e.g. "GET /callback?code=…&state=… HTTP/1.1"
+            let target = request_line.split_whitespace().nth(1).unwrap_or_default();
+            let params = target.rsplit_once('?').map(|(_, q)| q).unwrap_or("");
+            let mut code = None;
+            let mut state = None;
+            let mut error = None;
+            for kv in params.split('&') {
+                let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+                match k {
+                    "code" => code = Some(dec(v)),
+                    "state" => state = Some(dec(v)),
+                    "error" => error = Some(dec(v)),
+                    _ => {}
+                }
+            }
+
+            let body_text = if error.is_some() {
+                "<html><body><h3>Authorization failed — you can close this window.</h3></body></html>"
+                    .to_string()
+            } else {
+                "<html><body><h3>Authorization received — you can close this window.</h3></body></html>"
+                    .to_string()
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                body_text.len(),
+                body_text
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+
+            if let Some(err) = error {
+                return Err(format!("authorization server returned error: {err}"));
+            }
+            if state.as_deref() != Some(expected_state) {
+                return Err("state mismatch in OAuth callback (possible CSRF)".to_string());
+            }
+            code.ok_or_else(|| "OAuth callback missing 'code' parameter".to_string())
+        };
+        tokio::time::timeout(CALLBACK_TIMEOUT, fut)
+            .await
+            .map_err(|_| "timed out waiting for the OAuth redirect".to_string())?
+    }
+}
+
+/// Percent-decode a query parameter value (`+` → space).
+fn dec(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && b.len() >= i + 3 {
+            if let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16)
+            {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        if b[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -655,5 +783,59 @@ mod tests {
         .await
         .expect_err("missing client_id must error");
         assert!(err.contains("client_id"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn wait_code_captures_code_and_verifies_state() {
+        // Arc: TcpListener is not Clone and tokio::spawn needs 'static.
+        let listener = std::sync::Arc::new(AuthorizationListener::bind().await.expect("bind"));
+        let redirect = listener.redirect_uri().to_string();
+        assert!(redirect.starts_with("http://127.0.0.1:"), "{redirect}");
+
+        let handle = tokio::spawn({
+            let listener = listener.clone();
+            async move { listener.wait_code("expected-state").await }
+        });
+        // Simulate the browser redirect (percent-encoded code included).
+        let browser_url = format!("{redirect}?code=abc%2Fdef.XY&state=expected-state");
+        let resp = reqwest::get(&browser_url).await.expect("browser GET");
+        assert!(resp.status().is_success());
+
+        let code = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("no test hang")
+            .expect("join")
+            .expect("code captured");
+        assert_eq!(code, "abc/def.XY", "percent-encoding must be decoded");
+    }
+
+    #[tokio::test]
+    async fn wait_code_rejects_state_mismatch() {
+        let listener = AuthorizationListener::bind().await.expect("bind");
+        let redirect = listener.redirect_uri().to_string();
+        let handle = tokio::spawn(async move { listener.wait_code("right").await });
+        let browser_url = format!("{redirect}?code=x&state=wrong");
+        let _ = reqwest::get(&browser_url).await;
+        let err = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("no test hang")
+            .expect("join")
+            .expect_err("state mismatch must error");
+        assert!(err.contains("state mismatch"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn wait_code_surfaces_authorization_error() {
+        let listener = AuthorizationListener::bind().await.expect("bind");
+        let redirect = listener.redirect_uri().to_string();
+        let handle = tokio::spawn(async move { listener.wait_code("s").await });
+        let browser_url = format!("{redirect}?error=access_denied");
+        let _ = reqwest::get(&browser_url).await;
+        let err = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("no test hang")
+            .expect("join")
+            .expect_err("error param must error");
+        assert!(err.contains("access_denied"), "{err}");
     }
 }
