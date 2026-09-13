@@ -7,7 +7,6 @@ use serde_json::{json, Value};
 use crate::{Plugin, PluginManifest};
 
 /// Official forecast endpoint (overridable via `[plugins.weather].api_base`).
-#[allow(dead_code)] // consumed by the forecast fetch (later task)
 const DEFAULT_FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
 /// Official geocoding endpoint (overridable via `[plugins.weather].geocoding_base`).
 #[allow(dead_code)] // consumed by the geocoding request (later task)
@@ -63,6 +62,97 @@ impl WeatherPlugin {
             self.geocoding_base.trim().to_string()
         }
     }
+
+    /// Resolve a location string against the Geocoding API, returning the
+    /// first match's coordinates and labels.
+    #[allow(dead_code)] // consumed by `call` orchestration (Task 6)
+    async fn geocode(&self, location: &str) -> Result<GeoResult, String> {
+        let client = reqwest::Client::builder()
+            .timeout(TIMEOUT)
+            .build()
+            .map_err(|e| format!("http client build failed: {e}"))?;
+        let resp = client
+            .get(self.geocode_url())
+            .query(&[
+                ("name", location),
+                ("count", "5"),
+                ("language", "en"),
+                ("format", "json"),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("geocoding request failed: {e}"))?;
+        let status = resp.status();
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("geocoding body read failed: {e}"))?;
+        if body.len() > MAX_BODY_BYTES {
+            return Err(format!("geocoding response exceeds {MAX_BODY_BYTES} bytes"));
+        }
+        let body: Value = serde_json::from_slice(&body)
+            .map_err(|e| format!("geocoding response not JSON: {e}"))?;
+        if !status.is_success() {
+            let reason = body
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown reason");
+            return Err(format!("geocoding failed (HTTP {status}): {reason}"));
+        }
+        if body.get("error").and_then(Value::as_bool) == Some(true) {
+            let reason = body
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown reason");
+            return Err(format!("geocoding failed: {reason}"));
+        }
+        let first = body
+            .get("results")
+            .and_then(Value::as_array)
+            .and_then(|r| r.first());
+        let Some(first) = first else {
+            return Err(format!("no location found for '{location}'"));
+        };
+        Ok(GeoResult {
+            name: first
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(location)
+                .to_string(),
+            admin1: first
+                .get("admin1")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            country: first
+                .get("country")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            timezone: first
+                .get("timezone")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            latitude: first
+                .get("latitude")
+                .and_then(Value::as_f64)
+                .ok_or("geocoding result missing latitude")?,
+            longitude: first
+                .get("longitude")
+                .and_then(Value::as_f64)
+                .ok_or("geocoding result missing longitude")?,
+        })
+    }
+}
+
+/// One geocoded place (first Open-Meteo search result).
+#[derive(Debug)]
+#[allow(dead_code)] // consumed by the forecast fetch (Task 5)
+struct GeoResult {
+    name: String,
+    admin1: Option<String>,
+    country: Option<String>,
+    timezone: Option<String>,
+    latitude: f64,
+    longitude: f64,
 }
 
 /// Unit system for the forecast request.
@@ -196,5 +286,66 @@ mod tests {
         assert_eq!(clamp_days(Some(3)), 3);
         assert_eq!(clamp_days(Some(0)), 1);
         assert_eq!(clamp_days(Some(99)), 7);
+    }
+
+    const GEOCODE_HIT: &str = r#"{
+        "results": [{"id": 2950159, "name": "Paris", "latitude": 48.85341,
+                     "longitude": 2.3488, "country": "France",
+                     "admin1": "Île-de-France", "timezone": "Europe/Paris"}],
+        "generationtime_ms": 1.2
+    }"#;
+
+    #[tokio::test]
+    async fn geocode_resolves_first_result() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::query_param("name", "Paris"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(GEOCODE_HIT))
+            .mount(&server)
+            .await;
+
+        let p = WeatherPlugin::new(String::new()).with_endpoints(String::new(), server.uri());
+        let geo = p.geocode("Paris").await.expect("resolved");
+        assert_eq!(geo.name, "Paris");
+        assert_eq!(geo.country.as_deref(), Some("France"));
+        assert_eq!(geo.admin1.as_deref(), Some("Île-de-France"));
+        assert_eq!(geo.timezone.as_deref(), Some("Europe/Paris"));
+        assert!((geo.latitude - 48.85341).abs() < 1e-9);
+        assert!((geo.longitude - 2.3488).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn geocode_no_results_is_a_recoverable_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_string(r#"{"generationtime_ms": 0.5}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let p = WeatherPlugin::new(String::new()).with_endpoints(String::new(), server.uri());
+        let err = p.geocode("Nowhereville").await.expect_err("must fail");
+        assert!(
+            err.contains("no location found for 'Nowhereville'"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn geocode_upstream_error_surfaces_the_reason() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400)
+                    .set_body_string(r#"{"error": true, "reason": "Invalid name"}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let p = WeatherPlugin::new(String::new()).with_endpoints(String::new(), server.uri());
+        let err = p.geocode("X").await.expect_err("must fail");
+        assert!(err.contains("400") && err.contains("Invalid name"), "{err}");
     }
 }
