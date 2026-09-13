@@ -105,6 +105,10 @@ pub struct LlmConfig {
     pub chat_path: String,
     #[serde(default = "default_llm_model")]
     pub model: String,
+    /// Optional reasoning effort sent as `reasoning_effort` on every chat
+    /// request ("minimal", "low", "medium", "high"). Empty = not sent.
+    #[serde(default)]
+    pub reasoning_effort: String,
 }
 
 fn default_llm_base_url() -> String {
@@ -270,6 +274,7 @@ impl Default for Config {
                 api_key: String::new(),
                 chat_path: default_llm_chat_path(),
                 model: default_llm_model(),
+                reasoning_effort: String::new(),
             },
             session: SessionConfig {
                 silence_ms: default_silence_ms(),

@@ -26,6 +26,7 @@ base_url = "https://ai.zippystation.com/api"
 api_key = "SET-ME"
 chat_path = "/api/chat/completions"   # alternates: /v1/chat/completions
 model = "default"
+# reasoning_effort = "low"            # optional: sent as `reasoning_effort` on every request ("minimal"/"low"/"medium"/"high"); unset = not sent
 
 [session]
 silence_ms = 700

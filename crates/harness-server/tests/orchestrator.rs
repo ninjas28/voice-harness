@@ -584,3 +584,54 @@ async fn audio_utterance_empty_transcript_skips_llm() {
     // Nothing entered history either.
     assert!(session.history.is_empty());
 }
+
+#[tokio::test]
+async fn llm_reasoning_effort_flows_from_config_into_every_request() {
+    let llm = Arc::new(MockLlm::new(two_sentence_script()));
+    let mut config = Config::default();
+    config.llm.reasoning_effort = "high".to_string();
+    let deps = Deps {
+        config,
+        llm: llm.clone(),
+        tts: Arc::new(MockTts::new()),
+        stt: Arc::new(MockStt {
+            text: String::new(),
+            calls: AtomicUsize::new(0),
+        }),
+        plugins: Arc::new(PluginRegistry::new()),
+    };
+
+    let (tx, rx) = mpsc::channel(64);
+    let mut session = Session::default();
+    run_text_turn(&deps, &mut session, "hi", tx)
+        .await
+        .expect("turn completes");
+    let _ = collect_events_all(rx).await;
+
+    let requests = llm.requests();
+    assert_eq!(requests.len(), 1, "one LLM round expected");
+    assert_eq!(
+        requests[0].reasoning_effort.as_deref(),
+        Some("high"),
+        "config.llm.reasoning_effort must reach the LLM request"
+    );
+
+    // Unset default → the request carries None.
+    let llm2 = Arc::new(MockLlm::new(two_sentence_script()));
+    let deps2 = deps_with(
+        llm2.clone(),
+        Arc::new(MockTts::new()),
+        PluginRegistry::new(),
+    );
+    let (tx2, rx2) = mpsc::channel(64);
+    let mut session2 = Session::default();
+    run_text_turn(&deps2, &mut session2, "hi", tx2)
+        .await
+        .expect("turn completes");
+    let _ = collect_events_all(rx2).await;
+    assert_eq!(
+        llm2.requests()[0].reasoning_effort,
+        None,
+        "default config must not set reasoning_effort"
+    );
+}

@@ -17,6 +17,7 @@ fn chat_req() -> ChatRequest {
         model: "test-model".to_string(),
         messages: vec![ChatMessage::text("user", "hi there")],
         tools: None,
+        reasoning_effort: None,
     }
 }
 
@@ -208,6 +209,49 @@ async fn stream_terminates_after_sse_body_ends() {
                 finish_reason: None
             },
         ]
+    );
+}
+
+#[tokio::test]
+async fn reasoning_effort_is_sent_when_set_and_omitted_when_none() {
+    // Set: the key must reach the wire.
+    let server = MockServer::start().await;
+    let body = sse_body(&[chunk(json!({ "content": "ok" }), None)]);
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({
+            "reasoning_effort": "high",
+            "stream": true,
+            "model": "test-model"
+        })))
+        .respond_with(sse_response(body.clone()))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let mut req = chat_req();
+    req.reasoning_effort = Some("high".to_string());
+    let events = collect(client.stream_chat(req).await.expect("stream_chat")).await;
+    assert!(matches!(events.last(), Some(LlmEvent::Done { .. })));
+
+    // Unset: the key must not appear in the JSON body at all.
+    let server2 = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse_response(body.clone()))
+        .mount(&server2)
+        .await;
+    let client2 = client_for(&server2);
+    let _ = collect(client2.stream_chat(chat_req()).await.expect("stream_chat")).await;
+    let seen = server2
+        .received_requests()
+        .await
+        .expect("received requests")
+        .remove(0);
+    let sent: serde_json::Value = serde_json::from_slice(&seen.body).expect("json body");
+    assert!(
+        sent.get("reasoning_effort").is_none(),
+        "reasoning_effort must be omitted when unset: {sent}"
     );
 }
 

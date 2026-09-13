@@ -74,6 +74,8 @@ fn build_request(deps: &Deps, messages: &[ChatMessage]) -> ChatRequest {
         model: deps.config.llm.model.clone(),
         messages: full,
         tools: Some(deps.plugins.tool_specs()),
+        reasoning_effort: (!deps.config.llm.reasoning_effort.trim().is_empty())
+            .then(|| deps.config.llm.reasoning_effort.clone()),
     }
 }
 

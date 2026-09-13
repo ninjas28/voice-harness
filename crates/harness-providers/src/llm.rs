@@ -59,6 +59,10 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<serde_json::Value>>,
+    /// OpenAI-style reasoning effort ("minimal"|"low"|"medium"|"high").
+    /// `None` = the key is omitted from the request entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// One streamed event from a chat completion.
