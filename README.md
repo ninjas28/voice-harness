@@ -82,6 +82,21 @@ JSON text frames with dotted `type` tags; audio is base64 PCM16, 16 kHz mono.
 (WAV/PCM16) and returns transcript, response text, and full audio in one JSON
 body. All endpoints require `Authorization: Bearer <api_key>`.
 
+### Sentence-end gate
+
+VAD endpointing fires on any pause longer than `session.silence_ms`, so a
+mid-sentence hesitation ("can you look up uh … the weather for tomorrow?")
+would otherwise become several separate LLM turns. With
+`session.require_sentence_end = true` (the default), the realtime session
+instead holds a transcribed utterance that does not end in sentence-terminal
+punctuation (`. ! ? …`) and concatenates it with the next utterance's
+transcript; one turn dispatches when the joined transcript finally ends a
+sentence. Safety valves: a held fragment dispatches anyway after
+`session.sentence_end_wait_ms` of silence with no continuation (the deadline
+is deferred while the VAD has an utterance open), and an explicit `speech.end`
+flushes it immediately. Transcripts are echoed to the client either way, so
+the panel shows fragments as they are recognized.
+
 ## Tests
 
 ```sh

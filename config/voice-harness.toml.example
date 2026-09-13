@@ -39,6 +39,14 @@ pre_speech_ms = 500
 chunk_max_chars = 200
 max_history_turns = 8
 idle_timeout_secs = 600
+# Sentence-end gate: hold a transcribed utterance that lacks terminal
+# punctuation (. ! ? …) and concatenate it with the next utterance, so a
+# mid-sentence pause (an "uh", a breath) doesn't fire a separate LLM turn.
+require_sentence_end = true
+# A held fragment dispatches anyway after this much silence with no
+# continuation (deadline is deferred while speech is in progress), and an
+# explicit speech.end flushes it immediately.
+sentence_end_wait_ms = 2000
 
 [prompts]
 system = "You are a helpful home voice assistant. Answer concisely — 1 to 3 sentences unless the user asks for detail. Speak plainly; never output markdown, code fences, or lists. You can call tools when useful."
