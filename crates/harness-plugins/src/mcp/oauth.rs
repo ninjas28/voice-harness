@@ -9,6 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use harness_core::config::McpServerConfig;
+
 /// Refresh when the access token is within this margin of expiry.
 const EXPIRY_MARGIN_SECS: u64 = 60;
 
@@ -514,6 +516,140 @@ fn dec(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+async fn post_form(
+    client: &reqwest::Client,
+    url: &str,
+    form: &[(&str, &str)],
+) -> Result<TokenResponse, String> {
+    let resp = tokio::time::timeout(DISCOVERY_TIMEOUT, client.post(url).form(form).send())
+        .await
+        .map_err(|_| "token request timed out".to_string())?
+        .map_err(|e| format!("token request failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "token endpoint -> HTTP {status}: {}",
+            truncate(&body, 300)
+        ));
+    }
+    resp.json()
+        .await
+        .map_err(|e| format!("bad token response: {e}"))
+}
+
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(DISCOVERY_TIMEOUT)
+        .build()
+        .map_err(|e| format!("http client: {e}"))
+}
+
+/// Exchange an authorization code for tokens (PKCE verifier attached,
+/// RFC 8707 `resource` included when known).
+pub async fn exchange_code(
+    token_endpoint: &str,
+    code: &str,
+    verifier: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    resource: Option<&str>,
+) -> Result<TokenResponse, String> {
+    let client = http_client()?;
+    let mut form = vec![
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("code_verifier", verifier),
+        ("client_id", client_id),
+        ("redirect_uri", redirect_uri),
+    ];
+    if let Some(r) = resource {
+        form.push(("resource", r));
+    }
+    post_form(&client, token_endpoint, &form).await
+}
+
+/// Refresh an access token (rotating refresh tokens are stored by the caller).
+pub async fn refresh_token(
+    token_endpoint: &str,
+    refresh_token: &str,
+    client_id: &str,
+    resource: Option<&str>,
+) -> Result<TokenResponse, String> {
+    let client = http_client()?;
+    let mut form = vec![
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+    ];
+    if let Some(r) = resource {
+        form.push(("resource", r));
+    }
+    post_form(&client, token_endpoint, &form).await
+}
+
+/// Interactive end-to-end flow: discover → register (or static client_id) →
+/// open the browser → capture the loopback callback → exchange → persist.
+/// Prints the URL it opened so a headless operator can copy-paste it.
+pub async fn run_authorization_flow(
+    server: &McpServerConfig,
+    token_store_path: &str,
+) -> Result<(), String> {
+    let (prm, asm) = probe_and_discover(&server.url).await?;
+    let listener = AuthorizationListener::bind().await?;
+    let redirect_uri = listener.redirect_uri().to_string();
+
+    let client_id = if server.client_id.is_empty() {
+        let Some(endpoint) = &asm.registration_endpoint else {
+            return Err(
+                "server supports neither dynamic registration nor a configured client_id"
+                    .to_string(),
+            );
+        };
+        register_client(
+            endpoint,
+            &redirect_uri,
+            &format!("voice-harness ({})", server.name),
+        )
+        .await?
+    } else {
+        server.client_id.clone()
+    };
+
+    let (verifier, challenge) = pkce_pair()?;
+    let state = random_state()?;
+    let url = authorize_url(
+        &asm,
+        &client_id,
+        &redirect_uri,
+        &server.scopes,
+        &state,
+        &challenge,
+        Some(prm.resource.as_str()),
+    );
+
+    println!("Open this URL to authorize '{}':\n  {url}", server.name);
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(not(target_os = "macos"))]
+    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+
+    let code = listener.wait_code(&state).await?;
+    let resp = exchange_code(
+        &asm.token_endpoint,
+        &code,
+        &verifier,
+        &client_id,
+        &redirect_uri,
+        Some(prm.resource.as_str()),
+    )
+    .await?;
+    let mut token = StoredToken::from_response(&resp);
+    token.client_id = Some(client_id);
+    TokenStore::new(token_store_path).put(&server.name, token)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,5 +973,91 @@ mod tests {
             .expect("join")
             .expect_err("error param must error");
         assert!(err.contains("access_denied"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn exchange_code_posts_pkce_verifier_and_stores_token() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "at-1", "refresh_token": "rt-1",
+                "expires_in": 3600, "token_type": "Bearer"
+            })))
+            .mount(&server)
+            .await;
+
+        let resp = exchange_code(
+            &format!("{}/token", server.uri()),
+            "the-code",
+            "the-verifier",
+            "cid",
+            "http://127.0.0.1:5000/callback",
+            Some("https://mcp.example.com/mcp"),
+        )
+        .await
+        .expect("exchanged");
+        assert_eq!(resp.access_token, "at-1");
+
+        let req = server
+            .received_requests()
+            .await
+            .expect("requests")
+            .remove(0);
+        let body = String::from_utf8_lossy(&req.body).to_string();
+        assert!(body.contains("grant_type=authorization_code"), "{body}");
+        assert!(body.contains("code=the-code"), "{body}");
+        assert!(body.contains("code_verifier=the-verifier"), "{body}");
+        assert!(
+            body.contains("resource=https%3A%2F%2Fmcp.example.com%2Fmcp"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_posts_refresh_grant_and_rotates() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "at-2", "refresh_token": "rt-2",
+                "expires_in": 1800
+            })))
+            .mount(&server)
+            .await;
+
+        let resp = refresh_token(&format!("{}/token", server.uri()), "rt-1", "cid", None)
+            .await
+            .expect("refreshed");
+        assert_eq!(resp.access_token, "at-2");
+        assert_eq!(resp.refresh_token.as_deref(), Some("rt-2"));
+
+        let body = String::from_utf8_lossy(
+            &server
+                .received_requests()
+                .await
+                .expect("requests")
+                .remove(0)
+                .body,
+        )
+        .to_string();
+        assert!(body.contains("grant_type=refresh_token"), "{body}");
+        assert!(body.contains("refresh_token=rt-1"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn token_endpoint_error_is_mapped() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(400)
+                    .set_body_string("{\"error\":\"invalid_grant\"}"),
+            )
+            .mount(&server)
+            .await;
+        let err = refresh_token(&format!("{}/token", server.uri()), "rt", "cid", None)
+            .await
+            .expect_err("must fail");
+        assert!(err.contains("400"), "{err}");
     }
 }
