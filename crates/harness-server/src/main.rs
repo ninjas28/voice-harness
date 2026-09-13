@@ -1,5 +1,8 @@
 //! Server binary: load config, build real provider clients, serve the router.
+//! Subcommand: `harness-server auth <mcp-server-name> [config-path]` runs the
+//! OAuth 2.1 browser flow for one MCP server and stores its tokens.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use harness_core::config::Config;
@@ -19,14 +22,24 @@ async fn main() {
         )
         .init();
 
-    let config_path = std::env::args()
-        .nth(1)
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::path::PathBuf::from("config/voice-harness.toml")
-                .exists()
-                .then_some(std::path::PathBuf::from("config/voice-harness.toml"))
-        });
+    let mut args = std::env::args().skip(1);
+    let first = args.next();
+
+    if first.as_deref() == Some("auth") {
+        let Some(server_name) = args.next() else {
+            eprintln!("usage: harness-server auth <mcp-server-name> [config-path]");
+            std::process::exit(2);
+        };
+        let config_path = args.next();
+        run_auth_command(&server_name, config_path.as_deref()).await;
+        return;
+    }
+
+    let config_path = first.map(std::path::PathBuf::from).or_else(|| {
+        std::path::PathBuf::from("config/voice-harness.toml")
+            .exists()
+            .then_some(std::path::PathBuf::from("config/voice-harness.toml"))
+    });
 
     let config = Config::load(config_path.as_deref()).unwrap_or_else(|e| {
         eprintln!("failed to load config: {e}");
@@ -53,6 +66,9 @@ async fn main() {
         config: config.clone(),
     };
 
+    // Async one-time plugin setup: MCP servers fetch their tool lists here.
+    deps.plugins.warm_all().await;
+
     let app = build_router(deps);
     let listener = tokio::net::TcpListener::bind(&config.server.bind)
         .await
@@ -64,4 +80,50 @@ async fn main() {
     axum::serve(listener, app)
         .await
         .expect("server runs until stopped");
+}
+
+/// `auth` subcommand: run the OAuth flow for one configured MCP server.
+async fn run_auth_command(server_name: &str, config_path: Option<&str>) {
+    let config = Config::load(config_path.map(Path::new)).unwrap_or_else(|e| {
+        eprintln!("failed to load config: {e}");
+        std::process::exit(1);
+    });
+    let Some(server) = config
+        .plugins
+        .mcp
+        .servers
+        .iter()
+        .find(|s| s.name == server_name)
+    else {
+        eprintln!(
+            "no mcp server named '{server_name}' in config (configured: {:?})",
+            config
+                .plugins
+                .mcp
+                .servers
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        std::process::exit(1);
+    };
+    if server.auth != "oauth" {
+        eprintln!(
+            "mcp server '{server_name}' uses '{}' auth — no interactive authorization needed",
+            server.auth
+        );
+        std::process::exit(1);
+    }
+    match harness_plugins::mcp::oauth::run_authorization_flow(
+        server,
+        &config.plugins.mcp.token_store,
+    )
+    .await
+    {
+        Ok(()) => println!("stored OAuth token for mcp server '{server_name}'"),
+        Err(e) => {
+            eprintln!("authorization failed: {e}");
+            std::process::exit(1);
+        }
+    }
 }
