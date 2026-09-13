@@ -3,5 +3,6 @@
 pub mod chunker;
 pub mod config;
 pub mod error;
+pub mod sentence;
 pub mod types;
 pub mod vad;
