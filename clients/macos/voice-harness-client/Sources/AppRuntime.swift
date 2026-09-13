@@ -22,7 +22,10 @@ final class AppRuntime: ObservableObject {
             player?.rate = playbackRate
         }
     }
-    let serverURL = AppSettings.serverURL
+    /// Editable server URL for the settings field. Persisted via
+    /// `AppSettings`; changing it while running stops the live session so the
+    /// next start reconnects to the new endpoint.
+    @Published var serverURLString: String = AppSettings.storedServerURLString ?? AppSettings.defaultServerURLString
 
     /// The wire→UI state machine; single source of truth, mirrored above.
     let model = HarnessSessionModel()
@@ -49,6 +52,21 @@ final class AppRuntime: ObservableObject {
         if running { stop() } else { await start() }
     }
 
+    /// Commits the settings field to `AppSettings`. Returns an error message
+    /// for invalid input (nothing is stored), or nil on success. Clearing the
+    /// field restores the default URL. A running session is stopped so the
+    /// next start reconnects to the committed endpoint.
+    @discardableResult
+    func commitServerURL(_ raw: String) -> String? {
+        guard let sanitized = AppSettings.sanitizeServerURLString(raw) else {
+            return "Enter a ws:// or wss:// URL with a host (e.g. \(AppSettings.defaultServerURLString))"
+        }
+        AppSettings.setServerURLString(sanitized)
+        serverURLString = sanitized.isEmpty ? AppSettings.defaultServerURLString : sanitized
+        if running { stop() }
+        return nil
+    }
+
     func start() async {
         guard !running, !isBusy else { return }
         isBusy = true
@@ -56,6 +74,7 @@ final class AppRuntime: ObservableObject {
         errorMessage = nil
         model.reset()
 
+        let serverURL = AppSettings.serverURL
         // Order matters on macOS: the input tap must be installed and the
         // engine prepared BEFORE engine.start() — tapping a running engine's
         // input node silently never fires. So: create player + client, install

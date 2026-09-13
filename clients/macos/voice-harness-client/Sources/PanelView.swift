@@ -3,6 +3,8 @@ import voicekit
 
 struct PanelView: View {
     @ObservedObject var runtime: AppRuntime
+    @State private var showSettings = false
+    @State private var settingsError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -10,6 +12,14 @@ struct PanelView: View {
                 Circle().fill(phaseColor).frame(width: 10, height: 10)
                 Text(phaseLabel).font(.headline)
                 Spacer()
+                Button {
+                    showSettings.toggle()
+                    if !showSettings { settingsError = nil }
+                } label: {
+                    Image(systemName: showSettings ? "gearshape.fill" : "gearshape")
+                }
+                .buttonStyle(.bordered)
+                .help("Server settings")
                 Button(runtime.running ? "Stop" : "Start") {
                     Task { await runtime.toggle() }
                 }
@@ -23,6 +33,9 @@ struct PanelView: View {
             }
             .pickerStyle(.segmented)
             .controlSize(.small)
+            if showSettings {
+                settingsSection
+            }
             if let err = runtime.errorMessage {
                 Text(err).foregroundStyle(.red).font(.caption)
             }
@@ -43,7 +56,7 @@ struct PanelView: View {
             if runtime.running {
                 HStack {
                     Text("Server").font(.caption).foregroundStyle(.secondary)
-                    Text(runtime.serverURL.absoluteString)
+                    Text(AppSettings.serverURL.absoluteString)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -56,6 +69,44 @@ struct PanelView: View {
         // fixedSize(vertical) lets the window grow/shrink with the content so
         // long transcripts are never truncated.
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Editable server endpoint. Saving validates + persists via the runtime
+    /// and stops a running session so the next start reconnects.
+    private var settingsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Server URL").font(.caption).foregroundStyle(.secondary)
+            TextField("ws://host:8090/v1/realtime", text: $runtime.serverURLString)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(saveURL)
+            if let settingsError {
+                Text(settingsError).font(.caption).foregroundStyle(.red)
+            }
+            HStack {
+                Button("Save", action: saveURL)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(runtime.serverURLString == AppSettings.serverURL.absoluteString)
+                Button("Reset") {
+                    runtime.serverURLString = AppSettings.defaultServerURLString
+                    settingsError = nil
+                }
+                Spacer()
+                if runtime.running {
+                    Text("Saving stops the session")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func saveURL() {
+        if let error = runtime.commitServerURL(runtime.serverURLString) {
+            settingsError = error
+        } else {
+            settingsError = nil
+            showSettings = false
+        }
     }
 
     private var displayText: String {

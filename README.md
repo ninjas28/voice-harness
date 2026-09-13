@@ -115,8 +115,11 @@ cargo run --release --example loopback -- \
 
 ## Client notes (macOS)
 
-- The panel is a `MenuBarExtra` window; settings persist in the app's
-  `UserDefaults` domain (`server_url`, `tts_rate`).
+- The panel is a `MenuBarExtra` window; the gear button opens an in-panel
+  server URL editor. Saving validates (`ws://`/`wss://` + host), persists to
+  the app's `UserDefaults` domain (`server_url`, `tts_rate`), and stops a
+  running session — the next Start reconnects to the new endpoint. Clearing
+  the field restores the default (`ws://127.0.0.1:8090/v1/realtime`).
 - Mic and playback share one `AVAudioEngine` — required for Bluetooth headsets
   (two engines fight over the route and playback goes silent).
 - Deploy as an app bundle under `/Applications` and launch with `open`
@@ -127,8 +130,8 @@ cargo run --release --example loopback -- \
 - Harness: complete — 141 Rust tests green (fmt + clippy clean), verified
   end-to-end against the real STT/TTS/LLM servers (text turn, audio turn, WS
   streaming with server-side VAD).
-- macOS client: complete — 20 Swift tests green; live-verified: mic streaming,
+- macOS client: complete — 38 Swift tests green; live-verified: mic streaming,
   server VAD turns, streamed TTS playback with adjustable speed, phase
-  tracking owned by the client during playback.
+  tracking owned by the client during playback, in-panel server URL editor.
 - Deferred (by design): mic-paused-while-speaking (no barge-in without AEC),
   push-to-talk. Server deployment uses the systemd unit in `deploy/`.
