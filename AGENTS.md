@@ -61,6 +61,16 @@ Server → client: `state` (listening|speech|thinking|speaking), `transcript`,
   wrapped in `tokio::time::timeout` (10 s in Rust, ≤2 s waits in Swift player
   tests). No unbounded streams, no retry loops without a cap. An unbounded
   collect in this repo once OOM'd an entire machine.
+- **Wiremock gotchas**: a responder closure receives `&Request` (not `Request`
+  — closure type mismatches are cryptic E0631s) and there is no built-in
+  request counter. When a mock provider trait already wraps the upstream URL
+  (e.g. `MockLlm { url, requests }`), count there — incrementing the same
+  `Arc<AtomicUsize>` from both the wiremock closure AND the trait mock
+  double-counts every call.
+- **Tokio time races with default config**: a test that sleeps past a config
+  default (`sentence_end_wait_ms = 2s`, future `silence_ms`-adjacent timers)
+  hits the production timer. Tests must set wait knobs explicitly — long
+  (60s) to prove a hold, short (500ms) to prove a flush.
 - Commits are local-only (no push) unless explicitly asked.
 
 ## Hard-won domain lessons

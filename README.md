@@ -123,7 +123,7 @@ cargo run --release --example loopback -- \
 
 ## Status
 
-- Harness: complete — 90 Rust tests green (fmt + clippy clean), verified
+- Harness: complete — 141 Rust tests green (fmt + clippy clean), verified
   end-to-end against the real STT/TTS/LLM servers (text turn, audio turn, WS
   streaming with server-side VAD).
 - macOS client: complete — 20 Swift tests green; live-verified: mic streaming,
