@@ -1,0 +1,38 @@
+name: VoiceHarnessApp
+options:
+  bundleIdPrefix: wtf.geese
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  VoiceKit:
+    path: ../../macos/voice-harness-client
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  VoiceHarnessApp:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    dependencies:
+      - package: VoiceKit
+        product: voicekit
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Voice Harness
+        UILaunchScreen: {}
+        UIBackgroundModes: [audio]
+        NSMicrophoneUsageDescription: "Voice Harness streams your microphone to your own voice assistant server."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+schemes:
+  VoiceHarnessApp:
+    build:
+      targets:
+        VoiceHarnessApp: all
+    run:
+      config: Debug
