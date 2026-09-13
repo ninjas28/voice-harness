@@ -105,6 +105,18 @@ pub fn registry_from_config(cfg: &PluginsConfig) -> PluginRegistry {
             "http_fetch" => registry.register(Box::new(builtin::http_fetch::HttpFetchPlugin::new(
                 cfg.http_fetch.allowed_hosts.clone(),
             ))),
+            "web_search" => {
+                if cfg.web_search.base_url.trim().is_empty() {
+                    tracing::warn!(
+                        "web_search plugin enabled but no [plugins.web_search].base_url configured; skipping"
+                    );
+                } else {
+                    registry.register(Box::new(builtin::web_search::WebSearchPlugin::new(
+                        cfg.web_search.base_url.clone(),
+                        cfg.web_search.api_key.clone(),
+                    )));
+                }
+            }
             "weather" => registry.register(Box::new(
                 builtin::weather::WeatherPlugin::new(cfg.weather.default_location.clone())
                     .with_endpoints(

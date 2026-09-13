@@ -355,6 +355,39 @@ async fn weather_round_trip_through_registry_with_test_endpoints() {
 }
 
 #[tokio::test]
+async fn web_search_registers_tools_when_configured() {
+    let cfg = PluginsConfig {
+        enabled: vec!["web_search".to_string()],
+        web_search: WebSearchConfig {
+            base_url: "http://127.0.0.1:3002".to_string(),
+            api_key: String::new(),
+        },
+        ..Default::default()
+    };
+    let registry = registry_from_config(&cfg);
+    let names = spec_names(&registry);
+    assert!(
+        names.contains(&"web_search.search".to_string()),
+        "{names:?}"
+    );
+    assert!(names.contains(&"web_search.fetch".to_string()), "{names:?}");
+}
+
+#[tokio::test]
+async fn web_search_without_base_url_registers_nothing() {
+    let cfg = PluginsConfig {
+        enabled: vec!["web_search".to_string()],
+        web_search: WebSearchConfig::default(),
+        ..Default::default()
+    };
+    let registry = registry_from_config(&cfg);
+    assert!(
+        spec_names(&registry).is_empty(),
+        "enabled web_search without base_url must contribute no tools"
+    );
+}
+
+#[tokio::test]
 async fn web_search_search_parses_results_and_sends_query() {
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
