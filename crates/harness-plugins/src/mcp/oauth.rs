@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// Refresh when the access token is within this margin of expiry.
 const EXPIRY_MARGIN_SECS: u64 = 60;
@@ -279,6 +279,113 @@ pub async fn probe_and_discover(
     Ok((prm, asm))
 }
 
+/// Random 64-hex-char PKCE verifier + its S256 challenge (RFC 7636).
+pub fn pkce_pair() -> Result<(String, String), String> {
+    use base64::Engine as _;
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|e| format!("rng: {e}"))?;
+    let verifier: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(verifier.as_bytes());
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.as_slice());
+    Ok((verifier, challenge))
+}
+
+/// Random hex state for CSRF protection.
+pub fn random_state() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|e| format!("rng: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Minimal percent-encoding for query parameters (RFC 3986 unreserved kept).
+fn enc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Build the authorization-endpoint URL for the code + PKCE flow.
+pub fn authorize_url(
+    metadata: &AuthorizationServerMetadata,
+    client_id: &str,
+    redirect_uri: &str,
+    scopes: &[String],
+    state: &str,
+    code_challenge: &str,
+    resource: Option<&str>,
+) -> String {
+    let mut url = format!(
+        "{}?response_type=code&client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method=S256",
+        metadata.authorization_endpoint,
+        enc(client_id),
+        enc(redirect_uri),
+        enc(state),
+        enc(code_challenge),
+    );
+    if !scopes.is_empty() {
+        url.push_str(&format!("&scope={}", enc(&scopes.join(" "))));
+    }
+    if let Some(r) = resource {
+        url.push_str(&format!("&resource={}", enc(r)));
+    }
+    url
+}
+
+/// Register an OAuth client via RFC 7591 dynamic client registration
+/// (public client: PKCE, no secret).
+pub async fn register_client(
+    registration_endpoint: &str,
+    redirect_uri: &str,
+    client_name: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(DISCOVERY_TIMEOUT)
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let body = json!({
+        "client_name": client_name,
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    });
+    let resp = tokio::time::timeout(
+        DISCOVERY_TIMEOUT,
+        client.post(registration_endpoint).json(&body).send(),
+    )
+    .await
+    .map_err(|_| "client registration timed out".to_string())?
+    .map_err(|e| format!("client registration failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "client registration -> HTTP {status}: {}",
+            truncate(&text, 300)
+        ));
+    }
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("bad registration response: {e}"))?;
+    v.get("client_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "registration response missing client_id".to_string())
+}
+
+fn truncate(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +538,122 @@ mod tests {
             .await
             .expect_err("must fail");
         assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn pkce_pair_is_random_and_challenge_is_s256_of_verifier() {
+        let (v1, c1) = pkce_pair().expect("pair");
+        let (v2, c2) = pkce_pair().expect("pair");
+        assert_ne!(v1, v2, "verifiers must be random");
+        assert_eq!(v1.len(), 64, "64 hex chars");
+        // Challenge = base64url-no-pad(SHA256(verifier)) — verify the wiring
+        // with a known input via the same primitives.
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+        let expected =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(v1.as_bytes()));
+        assert_eq!(c1, expected);
+        assert_ne!(c1, c2);
+        assert!(!c1.contains('+') && !c1.contains('/'), "url-safe alphabet");
+    }
+
+    #[test]
+    fn random_state_differs_between_calls() {
+        let s1 = random_state().expect("state");
+        let s2 = random_state().expect("state");
+        assert_ne!(s1, s2);
+        assert_eq!(s1.len(), 32);
+    }
+
+    #[test]
+    fn authorize_url_carries_all_required_params() {
+        let asm = AuthorizationServerMetadata {
+            issuer: "https://auth.example.com".into(),
+            authorization_endpoint: "https://auth.example.com/authorize".into(),
+            token_endpoint: "https://auth.example.com/token".into(),
+            registration_endpoint: None,
+            scopes_supported: None,
+        };
+        let url = authorize_url(
+            &asm,
+            "client-1",
+            "http://127.0.0.1:54321/callback",
+            &["tools.read".to_string(), "tools.write".to_string()],
+            "state123",
+            "challengeXYZ",
+            Some("https://mcp.example.com/mcp"),
+        );
+        assert!(
+            url.starts_with("https://auth.example.com/authorize?"),
+            "{url}"
+        );
+        assert!(url.contains("response_type=code"), "{url}");
+        assert!(url.contains("client_id=client-1"), "{url}");
+        assert!(
+            url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A54321%2Fcallback"),
+            "{url}"
+        );
+        assert!(url.contains("state=state123"), "{url}");
+        assert!(
+            url.contains("code_challenge=challengeXYZ&code_challenge_method=S256"),
+            "{url}"
+        );
+        assert!(url.contains("scope=tools.read%20tools.write"), "{url}");
+        assert!(
+            url.contains("resource=https%3A%2F%2Fmcp.example.com%2Fmcp"),
+            "{url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_client_posts_rfc7591_body_and_returns_client_id() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/register"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(201)
+                    .set_body_json(json!({ "client_id": "cid-42" })),
+            )
+            .mount(&server)
+            .await;
+
+        let cid = register_client(
+            &format!("{}/register", server.uri()),
+            "http://127.0.0.1:5000/callback",
+            "voice-harness (test)",
+        )
+        .await
+        .expect("registered");
+        assert_eq!(cid, "cid-42");
+
+        let req = server
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .next()
+            .expect("a request");
+        let body: Value = serde_json::from_slice(&req.body).expect("json body");
+        assert_eq!(body["grant_types"][0], "authorization_code");
+        assert_eq!(body["grant_types"][1], "refresh_token");
+        assert_eq!(body["token_endpoint_auth_method"], "none");
+        assert_eq!(body["redirect_uris"][0], "http://127.0.0.1:5000/callback");
+    }
+
+    #[tokio::test]
+    async fn register_client_errors_without_client_id_in_response() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        let err = register_client(
+            &format!("{}/register", server.uri()),
+            "http://127.0.0.1:1/callback",
+            "x",
+        )
+        .await
+        .expect_err("missing client_id must error");
+        assert!(err.contains("client_id"), "{err}");
     }
 }
