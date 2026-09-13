@@ -22,7 +22,7 @@ sentence-chunked TTS audio.
 crates/
   harness-core/      config, wire types, VAD, utterance assembly, chunker
   harness-providers/ STT/TTS/LLM HTTP clients (wiremock-tested, never live)
-  harness-plugins/   tool-call loop + built-in plugins (time, weather, http_fetch) + MCP client/plugin (Streamable HTTP, bearer/OAuth)
+  harness-plugins/   tool-call loop + built-in plugins (time, weather, web_search) + MCP client/plugin (Streamable HTTP, bearer/OAuth)
   harness-server/    axum HTTP (`POST /v1/turn`) + WS (`/v1/realtime`)
 examples/loopback.rs WAV file → full turn over WS (manual E2E check)
 clients/macos/voice-harness-client/  SwiftPM macOS menu-bar client
