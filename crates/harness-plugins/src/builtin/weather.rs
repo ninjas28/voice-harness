@@ -7,15 +7,14 @@ use serde_json::{json, Value};
 use crate::{Plugin, PluginManifest};
 
 /// Official forecast endpoint (overridable via `[plugins.weather].api_base`).
+#[allow(dead_code)] // consumed by `fetch_forecast` (used via `call`, Task 6)
 const DEFAULT_FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
 /// Official geocoding endpoint (overridable via `[plugins.weather].geocoding_base`).
 #[allow(dead_code)] // consumed by the geocoding request (later task)
 const DEFAULT_GEOCODE_URL: &str = "https://geocoding-api.open-meteo.com/v1/search";
 /// Request timeout per upstream call (plan).
-#[allow(dead_code)] // consumed by the upstream fetches (later tasks)
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Response body cap: 64 KiB (plan).
-#[allow(dead_code)] // consumed by the upstream fetches (later tasks)
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// Allowlist-free weather lookup. The upstream host is fixed (or configured);
@@ -45,7 +44,8 @@ impl WeatherPlugin {
         self
     }
 
-    #[allow(dead_code)] // consumed by the upstream fetches (later tasks)
+    /// Endpoint override: forecast URL. Empty = official URL.
+    #[allow(dead_code)] // consumed by `fetch_forecast` (used via `call`, Task 6)
     fn forecast_url(&self) -> String {
         if self.api_base.trim().is_empty() {
             DEFAULT_FORECAST_URL.to_string()
@@ -54,7 +54,6 @@ impl WeatherPlugin {
         }
     }
 
-    #[allow(dead_code)] // consumed by the upstream fetches (later tasks)
     fn geocode_url(&self) -> String {
         if self.geocoding_base.trim().is_empty() {
             DEFAULT_GEOCODE_URL.to_string()
@@ -141,6 +140,133 @@ impl WeatherPlugin {
                 .ok_or("geocoding result missing longitude")?,
         })
     }
+
+    /// Request current conditions + daily forecast for geocoded coordinates.
+    #[allow(dead_code)] // consumed by `call` orchestration (Task 6)
+    async fn fetch_forecast(
+        &self,
+        geo: &GeoResult,
+        days: u32,
+        units: Units,
+    ) -> Result<Value, String> {
+        let (temp_unit, wind_unit, precip_unit) = match units {
+            Units::Metric => ("celsius", "kmh", "millimeter"),
+            Units::Imperial => ("fahrenheit", "mph", "inch"),
+        };
+        let client = reqwest::Client::builder()
+            .timeout(TIMEOUT)
+            .build()
+            .map_err(|e| format!("http client build failed: {e}"))?;
+        let resp = client
+            .get(self.forecast_url())
+            .query(&[
+                ("latitude", format!("{}", geo.latitude)),
+                ("longitude", format!("{}", geo.longitude)),
+                (
+                    "current",
+                    "temperature_2m,apparent_temperature,relative_humidity_2m,is_day,weather_code,wind_speed_10m"
+                        .to_string(),
+                ),
+                (
+                    "daily",
+                    "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+                        .to_string(),
+                ),
+                ("timezone", "auto".to_string()),
+                ("forecast_days", days.to_string()),
+                ("temperature_unit", temp_unit.to_string()),
+                ("wind_speed_unit", wind_unit.to_string()),
+                ("precipitation_unit", precip_unit.to_string()),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("forecast request failed: {e}"))?;
+        let status = resp.status();
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("forecast body read failed: {e}"))?;
+        if body.len() > MAX_BODY_BYTES {
+            return Err(format!("forecast response exceeds {MAX_BODY_BYTES} bytes"));
+        }
+        let body: Value = serde_json::from_slice(&body)
+            .map_err(|e| format!("forecast response not JSON: {e}"))?;
+        if body.get("error").and_then(Value::as_bool) == Some(true) {
+            let reason = body
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown reason");
+            return Err(format!("forecast failed (HTTP {status}): {reason}"));
+        }
+        if !status.is_success() {
+            return Err(format!("forecast failed (HTTP {status})"));
+        }
+        Ok(shape_forecast(geo, &body, units))
+    }
+}
+
+/// Shape the Open-Meteo forecast response into the compact LLM-facing JSON.
+#[allow(dead_code)] // consumed by `fetch_forecast` (used via `call`, Task 6)
+fn shape_forecast(geo: &GeoResult, body: &Value, units: Units) -> Value {
+    let (temp_name, wind_name, precip_name) = match units {
+        Units::Metric => ("degrees Celsius", "kilometers per hour", "millimeters"),
+        Units::Imperial => ("degrees Fahrenheit", "miles per hour", "inches"),
+    };
+    let cur = body.get("current").cloned().unwrap_or(Value::Null);
+    let daily = body.get("daily").cloned().unwrap_or(Value::Null);
+
+    let arr = |obj: &Value, key: &str| -> Vec<Value> {
+        obj.get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let times = arr(&daily, "time");
+    let codes = arr(&daily, "weather_code");
+    let highs = arr(&daily, "temperature_2m_max");
+    let lows = arr(&daily, "temperature_2m_min");
+    let probs = arr(&daily, "precipitation_probability_max");
+
+    let days: Vec<Value> = times
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            json!({
+                "date": t,
+                "high": highs.get(i),
+                "low": lows.get(i),
+                "condition": codes.get(i).and_then(Value::as_i64).map(wmo_description).unwrap_or("Unknown"),
+                "precip_probability_pct": probs.get(i),
+            })
+        })
+        .collect();
+
+    json!({
+        "location": {
+            "name": geo.name,
+            "admin1": geo.admin1,
+            "country": geo.country,
+            "timezone": geo.timezone,
+            "latitude": geo.latitude,
+            "longitude": geo.longitude,
+        },
+        "units": {
+            "temperature": temp_name,
+            "wind": wind_name,
+            "precipitation": precip_name,
+        },
+        "current": {
+            "time": cur.get("time"),
+            "temperature": cur.get("temperature_2m"),
+            "apparent": cur.get("apparent_temperature"),
+            "condition": cur.get("weather_code").and_then(Value::as_i64).map(wmo_description).unwrap_or("Unknown"),
+            "wind": cur.get("wind_speed_10m"),
+            "humidity_pct": cur.get("relative_humidity_2m"),
+            "is_day": cur.get("is_day").and_then(Value::as_i64).map(|v| v != 0),
+        },
+        "today": days.first().cloned().unwrap_or(Value::Null),
+        "days": days,
+    })
 }
 
 /// One geocoded place (first Open-Meteo search result).
@@ -347,5 +473,96 @@ mod tests {
         let p = WeatherPlugin::new(String::new()).with_endpoints(String::new(), server.uri());
         let err = p.geocode("X").await.expect_err("must fail");
         assert!(err.contains("400") && err.contains("Invalid name"), "{err}");
+    }
+
+    const FORECAST_JSON: &str = r#"{
+        "timezone": "Europe/Paris",
+        "current": {"time": "2026-09-12T14:30", "temperature_2m": 22.4,
+                    "apparent_temperature": 23.1, "relative_humidity_2m": 58,
+                    "is_day": 1, "weather_code": 2, "wind_speed_10m": 11.2},
+        "daily": {"time": ["2026-09-12", "2026-09-13"], "weather_code": [2, 3],
+                  "temperature_2m_max": [24.1, 25.0],
+                  "temperature_2m_min": [15.3, 16.0],
+                  "precipitation_probability_max": [10, 40]}
+    }"#;
+
+    fn geo_paris() -> GeoResult {
+        GeoResult {
+            name: "Paris".to_string(),
+            admin1: Some("Île-de-France".to_string()),
+            country: Some("France".to_string()),
+            timezone: Some("Europe/Paris".to_string()),
+            latitude: 48.85341,
+            longitude: 2.3488,
+        }
+    }
+
+    #[tokio::test]
+    async fn forecast_fetches_and_shapes_compact_json() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::query_param("latitude", "48.85341"))
+            .and(wiremock::matchers::query_param("longitude", "2.3488"))
+            .and(wiremock::matchers::query_param("forecast_days", "2"))
+            .and(wiremock::matchers::query_param("timezone", "auto"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(FORECAST_JSON))
+            .mount(&server)
+            .await;
+
+        let p = WeatherPlugin::new(String::new()).with_endpoints(server.uri(), String::new());
+        let out = p
+            .fetch_forecast(&geo_paris(), 2, Units::Metric)
+            .await
+            .expect("shaped");
+        assert_eq!(out["location"]["name"], "Paris");
+        assert_eq!(out["location"]["country"], "France");
+        assert_eq!(out["location"]["timezone"], "Europe/Paris");
+        assert_eq!(out["units"]["temperature"], "degrees Celsius");
+        assert_eq!(out["current"]["temperature"], 22.4);
+        assert_eq!(out["current"]["condition"], "Partly cloudy");
+        assert_eq!(out["current"]["is_day"], true);
+        assert_eq!(out["today"]["high"], 24.1);
+        assert_eq!(out["today"]["precip_probability_pct"], 10);
+        assert_eq!(out["days"].as_array().map(Vec::len), Some(2));
+        assert_eq!(out["days"][1]["condition"], "Overcast");
+    }
+
+    #[tokio::test]
+    async fn forecast_imperial_units_pass_through() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(FORECAST_JSON))
+            .mount(&server)
+            .await;
+
+        let p = WeatherPlugin::new(String::new()).with_endpoints(server.uri(), String::new());
+        let out = p
+            .fetch_forecast(&geo_paris(), 1, Units::Imperial)
+            .await
+            .expect("shaped");
+        assert_eq!(out["units"]["temperature"], "degrees Fahrenheit");
+        let requests = server.received_requests().await.expect("requests");
+        let url = requests[0].url.to_string();
+        assert!(url.contains("temperature_unit=fahrenheit"), "{url}");
+        assert!(url.contains("wind_speed_unit=mph"), "{url}");
+        assert!(url.contains("precipitation_unit=inch"), "{url}");
+    }
+
+    #[tokio::test]
+    async fn forecast_upstream_error_surfaces_the_reason() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(400).set_body_string(
+                r#"{"error": true, "reason": "Latitude must be between -90 and 90"}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let p = WeatherPlugin::new(String::new()).with_endpoints(server.uri(), String::new());
+        let err = p
+            .fetch_forecast(&geo_paris(), 1, Units::Metric)
+            .await
+            .expect_err("must fail");
+        assert!(err.contains("Latitude must be"), "{err}");
     }
 }
