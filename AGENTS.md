@@ -103,6 +103,12 @@ Server → client: `state` (listening|speech|thinking|speaking), `transcript`,
   `launchctl setenv VAR value` when a launch-time env var is genuinely needed.
 - **Pass the config path bare** (`harness-server config/voice-harness.toml`);
   there is no `--config` flag.
+- **AppIntents under Swift 6 strict concurrency**: `@MainActor` goes on
+  `perform()` only, never on the intent struct — a struct-isolated
+  conformance fails with "conformance crosses into main actor-isolated code".
+- **Pin the OS in simulator destinations** (`platform=iOS Simulator,name=iPhone 16 Pro,OS=18.5`):
+  a bare `name=` resolves to OS=latest, and installed devices exist only on
+  specific runtimes, so the unpinned form fails destination lookup.
 
 ## MCP servers (Streamable HTTP)
 
