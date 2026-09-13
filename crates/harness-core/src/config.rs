@@ -32,6 +32,7 @@ fn default_bind() -> String {
     "127.0.0.1:8090".to_string()
 }
 
+/// `[stt]` batch STT client config (multipart WAV upload → transcript).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SttConfig {
     #[serde(default = "default_stt_base_url")]
@@ -42,6 +43,37 @@ pub struct SttConfig {
     pub chat_path: String,
     #[serde(default = "default_stt_model")]
     pub model: String,
+    /// Streaming mode over the ASR server's realtime transcription WebSocket.
+    /// Disabled by default: batch stays the fallback and the loopback path.
+    #[serde(default)]
+    pub realtime: SttRealtimeConfig,
+}
+
+/// `[stt.realtime]`: streaming STT over the ASR server's realtime
+/// transcription WebSocket (nemo-speech.cpp). Enabled = the harness forwards
+/// client audio frames to the server's own VAD/endpointing and receives
+/// partial + final transcripts. Uses `[stt]`'s base_url/api_key (same server).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SttRealtimeConfig {
+    /// Off by default; batch transcription remains the fallback.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Realtime WS endpoint path on the same base_url as `[stt]`.
+    #[serde(default = "default_stt_realtime_path")]
+    pub path: String,
+    /// End-of-utterance silence threshold the upstream endpointing uses.
+    #[serde(default = "default_stt_realtime_endpointing_ms")]
+    pub endpointing_ms: u64,
+    /// BCP-47 language hint, e.g. "en-US". Empty = model default.
+    #[serde(default)]
+    pub language: String,
+}
+
+fn default_stt_realtime_path() -> String {
+    "/v1/audio/transcriptions/realtime".to_string()
+}
+fn default_stt_realtime_endpointing_ms() -> u64 {
+    700
 }
 
 fn default_stt_base_url() -> String {
@@ -303,6 +335,12 @@ impl Default for Config {
                 api_key: String::new(),
                 chat_path: default_stt_chat_path(),
                 model: default_stt_model(),
+                realtime: SttRealtimeConfig {
+                    enabled: false,
+                    path: default_stt_realtime_path(),
+                    endpointing_ms: default_stt_realtime_endpointing_ms(),
+                    language: String::new(),
+                },
             },
             tts: TtsConfig {
                 base_url: default_tts_base_url(),
@@ -636,6 +674,33 @@ system_file = "prompt.md"
             cfg.prompts.system, "SPEAK PLAIN.\nBe brief always.",
             "system_file content wins over inline system; trailing newline trimmed"
         );
+    }
+
+    #[test]
+    fn stt_realtime_defaults_disabled() {
+        let de: SttRealtimeConfig = serde_json::from_str("{}").expect("empty map parses");
+        assert!(!de.enabled);
+        assert_eq!(de.path, "/v1/audio/transcriptions/realtime");
+        assert_eq!(de.endpointing_ms, 700);
+        assert_eq!(de.language, "");
+    }
+
+    #[test]
+    fn stt_config_embeds_realtime_defaults() {
+        let de: SttConfig = serde_json::from_str("{}").expect("stt parses");
+        assert!(!de.realtime.enabled);
+    }
+
+    /// The JSON base layer in `Config::load` is serialized from `Config::default()`;
+    /// if the manual `Default` impl dropped or zeroed the realtime section, a
+    /// partial config file would silently lose the documented path/endpointing.
+    #[test]
+    fn config_load_defaults_carry_realtime_section() {
+        let cfg = Config::load(None).expect("defaults load");
+        assert!(!cfg.stt.realtime.enabled);
+        assert_eq!(cfg.stt.realtime.path, "/v1/audio/transcriptions/realtime");
+        assert_eq!(cfg.stt.realtime.endpointing_ms, 700);
+        assert_eq!(cfg.stt.realtime.language, "");
     }
 
     #[test]

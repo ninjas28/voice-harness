@@ -12,6 +12,12 @@ api_key = "SET-ME"
 chat_path = "/v1/audio/transcriptions"
 model = "asr-model"                # e.g. whisper-large-v3, parakeet
 
+[stt.realtime]                      # streaming STT over the ASR server's realtime WS (nemo-speech.cpp)
+enabled = false                     # default off; batch above remains the fallback
+path = "/v1/audio/transcriptions/realtime"
+endpointing_ms = 700                # end-of-utterance silence threshold (server-side endpointing)
+language = ""                       # empty = model default; e.g. "en-US"
+
 [tts]
 base_url = "http://127.0.0.1:8000"
 api_key = "SET-ME"
