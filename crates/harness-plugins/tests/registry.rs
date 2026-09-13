@@ -274,3 +274,25 @@ async fn http_fetch_reports_upstream_error_status() {
         .expect("result object");
     assert_eq!(out["status"], 500);
 }
+
+#[tokio::test]
+async fn weather_spec_surfaces_and_unknown_tool_errors() {
+    let cfg = PluginsConfig {
+        enabled: vec!["weather".to_string()],
+        http_fetch: HttpFetchConfig::default(),
+        weather: WeatherConfig::default(),
+        mcp: McpConfig::default(),
+    };
+    let registry = registry_from_config(&cfg);
+    let names = spec_names(&registry);
+    assert_eq!(names, vec!["weather.get_forecast".to_string()]);
+    for spec in registry.tool_specs() {
+        assert_eq!(spec["type"], "function");
+        assert!(spec["function"]["parameters"].is_object());
+    }
+    let err = registry
+        .dispatch("weather.nothing", json!({}))
+        .await
+        .expect_err("unknown tool must error");
+    assert!(err.contains("nothing"), "{err}");
+}

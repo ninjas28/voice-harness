@@ -105,6 +105,13 @@ pub fn registry_from_config(cfg: &PluginsConfig) -> PluginRegistry {
             "http_fetch" => registry.register(Box::new(builtin::http_fetch::HttpFetchPlugin::new(
                 cfg.http_fetch.allowed_hosts.clone(),
             ))),
+            "weather" => registry.register(Box::new(
+                builtin::weather::WeatherPlugin::new(cfg.weather.default_location.clone())
+                    .with_endpoints(
+                        cfg.weather.api_base.clone(),
+                        cfg.weather.geocoding_base.clone(),
+                    ),
+            )),
             "mcp" => {
                 if cfg.mcp.servers.is_empty() {
                     tracing::warn!("mcp plugin enabled but no [plugins.mcp.servers] configured");
