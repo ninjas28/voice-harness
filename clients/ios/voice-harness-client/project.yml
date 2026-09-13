@@ -29,10 +29,27 @@ targets:
         NSMicrophoneUsageDescription: "Voice Harness streams your microphone to your own voice assistant server."
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+  VoiceHarnessAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - ../../macos/voice-harness-client/Tests/voicekitTests
+    dependencies:
+      - target: VoiceHarnessApp
+      - package: VoiceKit
+        product: voicekit
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   VoiceHarnessApp:
     build:
       targets:
         VoiceHarnessApp: all
+        VoiceHarnessAppTests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - VoiceHarnessAppTests
