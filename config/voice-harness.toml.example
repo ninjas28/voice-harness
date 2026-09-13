@@ -53,7 +53,14 @@ system = "You are a helpful home voice assistant. Answer concisely — 1 to 3 se
 # system_file = "system-prompt.md"   # optional: load the system prompt from a markdown file (path relative to this config); overrides `system`
 
 [plugins]
-enabled = ["time", "http_fetch", "weather"]
+enabled = ["time", "web_search", "weather"]
+
+# Optional web search + page fetch via a self-hosted Firecrawl instance.
+# Tools surface as web_search.search / web_search.fetch. Requires base_url;
+# without it an enabled web_search plugin contributes no tools.
+# [plugins.web_search]
+# base_url = "http://192.168.10.94:3002"
+# api_key = ""                             # only for cloud Firecrawl
 
 # Optional weather plugin tuning (Open-Meteo, keyless). Defaults omitted =
 # official endpoints; uncomment to use a self-hosted instance or a default
