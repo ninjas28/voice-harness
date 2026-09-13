@@ -79,6 +79,14 @@ impl PluginRegistry {
         let (plugin, tool) = self.resolve(name)?;
         plugin.call(tool, args).await
     }
+
+    /// One-time async initialization of every plugin. Never fails: plugins
+    /// log their own problems and continue.
+    pub async fn warm_all(&self) {
+        for plugin in &self.plugins {
+            plugin.warm().await;
+        }
+    }
 }
 
 impl Default for PluginRegistry {

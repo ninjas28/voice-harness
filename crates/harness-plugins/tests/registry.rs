@@ -2,7 +2,65 @@
 
 use harness_core::config::{HttpFetchConfig, McpConfig, PluginsConfig};
 use harness_plugins::{registry_from_config, PluginRegistry};
-use serde_json::json;
+use serde_json::{json, Value};
+
+/// Counts warm() calls — verifies warm_all reaches every plugin.
+struct WarmCounter {
+    count: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl harness_plugins::Plugin for WarmCounter {
+    fn manifest(&self) -> &harness_plugins::PluginManifest {
+        static M: std::sync::OnceLock<harness_plugins::PluginManifest> = std::sync::OnceLock::new();
+        M.get_or_init(|| harness_plugins::PluginManifest {
+            name: "counter",
+            version: "0.1.0",
+            description: "test",
+        })
+    }
+    fn tool_specs(&self) -> Vec<Value> {
+        vec![]
+    }
+    async fn call(&self, _name: &str, _args: Value) -> Result<Value, String> {
+        Err("unused".into())
+    }
+    async fn warm(&self) {
+        self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn warm_all_warms_every_registered_plugin() {
+    let mut registry = PluginRegistry::new();
+    let counter = std::sync::Arc::new(WarmCounter {
+        count: std::sync::atomic::AtomicUsize::new(0),
+    });
+    // PluginRegistry owns Box<dyn Plugin>; wrap a clone-sharing adapter.
+    struct SharedCounter(std::sync::Arc<WarmCounter>);
+    #[async_trait::async_trait]
+    impl harness_plugins::Plugin for SharedCounter {
+        fn manifest(&self) -> &harness_plugins::PluginManifest {
+            self.0.manifest()
+        }
+        fn tool_specs(&self) -> Vec<Value> {
+            self.0.tool_specs()
+        }
+        async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
+            self.0.call(name, args).await
+        }
+        async fn warm(&self) {
+            self.0.warm().await
+        }
+    }
+    registry.register(Box::new(SharedCounter(counter.clone())));
+    registry.warm_all().await;
+    assert_eq!(
+        counter.count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "warm_all must call warm() on every plugin"
+    );
+}
 
 fn spec_names(registry: &PluginRegistry) -> Vec<String> {
     registry

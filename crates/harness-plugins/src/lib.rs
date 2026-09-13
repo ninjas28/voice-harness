@@ -29,4 +29,7 @@ pub trait Plugin: Send + Sync {
     fn manifest(&self) -> &PluginManifest;
     fn tool_specs(&self) -> Vec<Value>;
     async fn call(&self, name: &str, arguments: Value) -> Result<Value, String>;
+    /// One-time async setup (fetch remote tool lists, warm caches).
+    /// Default: nothing to do.
+    async fn warm(&self) {}
 }
