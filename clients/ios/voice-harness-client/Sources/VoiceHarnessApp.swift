@@ -2,7 +2,9 @@ import SwiftUI
 
 @main
 struct VoiceHarnessApp: App {
+    @StateObject private var runtime = AppRuntime.shared
+
     var body: some Scene {
-        WindowGroup { Text("Voice Harness") }
+        WindowGroup { ContentView(runtime: runtime) }
     }
 }
