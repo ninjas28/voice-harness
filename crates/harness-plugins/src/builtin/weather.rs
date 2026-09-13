@@ -65,6 +65,67 @@ impl WeatherPlugin {
     }
 }
 
+/// Unit system for the forecast request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // consumed by the forecast fetch (later task)
+enum Units {
+    Metric,
+    Imperial,
+}
+
+#[allow(dead_code)] // consumed by `call` argument parsing (later task)
+fn units_from(arg: &str) -> Units {
+    if arg.eq_ignore_ascii_case("imperial") {
+        Units::Imperial
+    } else {
+        Units::Metric
+    }
+}
+
+#[allow(dead_code)] // consumed by `call` argument parsing (later task)
+fn units_from_none(arg: Option<&str>) -> Units {
+    arg.map(units_from).unwrap_or(Units::Metric)
+}
+
+/// Forecast days including today, clamped to the API's 1..=7 range.
+#[allow(dead_code)] // consumed by `call` argument parsing (later task)
+fn clamp_days(arg: Option<u64>) -> u32 {
+    arg.unwrap_or(1).clamp(1, 7) as u32
+}
+
+/// WMO weather interpretation code → short speakable description
+/// (per Open-Meteo docs, "Weather variable documentation").
+#[allow(dead_code)] // consumed by forecast shaping (later task)
+fn wmo_description(code: i64) -> &'static str {
+    match code {
+        0 => "Clear sky",
+        1 => "Mainly clear",
+        2 => "Partly cloudy",
+        3 => "Overcast",
+        45 | 48 => "Fog",
+        51 => "Light drizzle",
+        53 => "Drizzle",
+        55 => "Heavy drizzle",
+        56 | 57 => "Freezing drizzle",
+        61 => "Light rain",
+        63 => "Rain",
+        65 => "Heavy rain",
+        66 | 67 => "Freezing rain",
+        71 => "Light snow",
+        73 => "Snow",
+        75 => "Heavy snow",
+        77 => "Snow grains",
+        80 => "Light rain showers",
+        81 => "Rain showers",
+        82 => "Violent rain showers",
+        85 => "Snow showers",
+        86 => "Heavy snow showers",
+        95 => "Thunderstorm",
+        96 | 99 => "Thunderstorm with hail",
+        _ => "Unknown",
+    }
+}
+
 #[async_trait]
 impl Plugin for WeatherPlugin {
     fn manifest(&self) -> &PluginManifest {
@@ -104,5 +165,36 @@ impl Plugin for WeatherPlugin {
             return Err(format!("weather plugin has no tool '{name}'"));
         }
         Err("weather lookup not implemented yet".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wmo_codes_map_to_speakable_conditions() {
+        assert_eq!(wmo_description(0), "Clear sky");
+        assert_eq!(wmo_description(2), "Partly cloudy");
+        assert_eq!(wmo_description(45), "Fog");
+        assert_eq!(wmo_description(63), "Rain");
+        assert_eq!(wmo_description(66), "Freezing rain");
+        assert_eq!(wmo_description(75), "Heavy snow");
+        assert_eq!(wmo_description(95), "Thunderstorm");
+        assert_eq!(wmo_description(99), "Thunderstorm with hail");
+        assert_eq!(wmo_description(42), "Unknown");
+        assert_eq!(wmo_description(-1), "Unknown");
+    }
+
+    #[test]
+    fn units_and_days_parse_and_clamp() {
+        assert_eq!(units_from("imperial"), Units::Imperial);
+        assert_eq!(units_from("metric"), Units::Metric);
+        assert_eq!(units_from("bogus"), Units::Metric);
+        assert_eq!(units_from_none(None), Units::Metric);
+        assert_eq!(clamp_days(None), 1);
+        assert_eq!(clamp_days(Some(3)), 3);
+        assert_eq!(clamp_days(Some(0)), 1);
+        assert_eq!(clamp_days(Some(99)), 7);
     }
 }
