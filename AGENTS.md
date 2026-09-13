@@ -24,7 +24,7 @@ sentence-chunked TTS audio.
 crates/
   harness-core/      config, wire types, VAD, utterance assembly, chunker
   harness-providers/ STT/TTS/LLM HTTP clients (wiremock-tested, never live)
-  harness-plugins/   tool-call loop + built-in plugins (e.g. time)
+  harness-plugins/   tool-call loop + built-in plugins (time) + MCP client/plugin (Streamable HTTP, bearer/OAuth)
   harness-server/    axum HTTP (`POST /v1/turn`) + WS (`/v1/realtime`)
 examples/loopback.rs WAV file → full turn over WS (manual E2E check)
 clients/macos/voice-harness-client/  SwiftPM macOS menu-bar client
@@ -94,6 +94,21 @@ Server → client: `state` (listening|speech|thinking|speaking), `transcript`,
   `launchctl setenv VAR value` when a launch-time env var is genuinely needed.
 - **Pass the config path bare** (`harness-server config/voice-harness.toml`);
   there is no `--config` flag.
+
+## MCP servers (Streamable HTTP)
+
+- Tools from `[plugins.mcp]` servers surface as `mcp.<server>.<tool>`; the single
+  `mcp` plugin aggregates all servers and warms at startup (`PluginRegistry::warm_all`).
+- A dead/unauthorized MCP server never blocks boot — it is skipped with a warning and
+  contributes no tools.
+- Auth: `auth = "bearer"` + `api_key`, or `auth = "oauth"` (OAuth 2.1, PKCE, dynamic
+  client registration, loopback redirect). Authorize once with
+  `harness-server auth <name>`; tokens live in `config/mcp-tokens.json` (chmod 600,
+  never commit). Refresh is automatic; a hard 401 tells the LLM to surface the error.
+- The MCP client is hand-rolled (`crates/harness-plugins/src/mcp/`), wiremock-tested,
+  and timeout-bounded everywhere — no MCP SDK dependency.
+- Session handling: `Mcp-Session-Id` is tracked per server; a 404 re-initializes once
+  and retries. Only `initialize` / `tools/list` / `tools/call` are spoken.
 
 ## Client deployment (macOS)
 

@@ -23,6 +23,13 @@ mic audio ──▶ harness ──▶ STT (nemo-speech.cpp @ voicebox.zippystati
   transcript, phase indicator (listening/speech/thinking/speaking), and
   pitch-preserving TTS speed control.
 
+### MCP tools
+
+The harness can call tools on external MCP servers (Streamable HTTP). Configure them
+under `[plugins.mcp]` in `config/voice-harness.toml`; see `voice-harness.toml.example`.
+Bearer-key and OAuth 2.1 servers are supported (`harness-server auth <name>` performs
+the OAuth browser flow once; token refresh is automatic).
+
 ## Building
 
 Requires Rust (stable, edition 2024).
