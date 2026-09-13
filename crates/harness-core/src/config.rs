@@ -137,6 +137,17 @@ pub struct SessionConfig {
     pub max_history_turns: usize,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    /// Require a transcribed utterance to end with sentence-terminal
+    /// punctuation before dispatching it to the LLM. Utterances that end
+    /// mid-sentence (a VAD pause around an "uh") are held and concatenated
+    /// with the following utterance's transcript.
+    #[serde(default = "default_require_sentence_end")]
+    pub require_sentence_end: bool,
+    /// How long a held (sentence-incomplete) transcript may sit without new
+    /// speech before it dispatches anyway, so a complete command can never
+    /// hang forever. The deadline is deferred whenever the VAD reopens.
+    #[serde(default = "default_sentence_end_wait_ms")]
+    pub sentence_end_wait_ms: u64,
 }
 
 fn default_silence_ms() -> u64 {
@@ -159,6 +170,12 @@ fn default_max_history_turns() -> usize {
 }
 fn default_idle_timeout_secs() -> u64 {
     600
+}
+fn default_require_sentence_end() -> bool {
+    true
+}
+fn default_sentence_end_wait_ms() -> u64 {
+    2_000
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -284,6 +301,8 @@ impl Default for Config {
                 chunk_max_chars: default_chunk_max_chars(),
                 max_history_turns: default_max_history_turns(),
                 idle_timeout_secs: default_idle_timeout_secs(),
+                require_sentence_end: default_require_sentence_end(),
+                sentence_end_wait_ms: default_sentence_end_wait_ms(),
             },
             prompts: PromptsConfig {
                 system: default_system_prompt(),
@@ -454,6 +473,39 @@ scopes = ["home.read"]
             cfg.prompts.system_file, "",
             "default keeps the inline [prompts.system] behavior"
         );
+    }
+
+    #[test]
+    fn sentence_gate_defaults_on_with_two_second_wait() {
+        let cfg = Config::load(None).expect("defaults load");
+        assert!(cfg.session.require_sentence_end, "gate defaults on");
+        assert_eq!(cfg.session.sentence_end_wait_ms, 2_000);
+    }
+
+    #[test]
+    fn sentence_gate_parses_from_toml_and_env() {
+        let dir = std::env::temp_dir().join(format!("vh-sentgate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+[session]
+require_sentence_end = false
+sentence_end_wait_ms = 1500
+"#,
+        )
+        .expect("write config");
+        let cfg = Config::load(Some(&cfg_path)).expect("parses");
+        assert!(!cfg.session.require_sentence_end);
+        assert_eq!(cfg.session.sentence_end_wait_ms, 1_500);
+
+        // Env override wins over the file.
+        // SAFETY: tests run in one process; set_var here races nothing since
+        // each load consumes its own env vars and keys are test-unique.
+        std::env::set_var("VH_SESSION__REQUIRE_SENTENCE_END", "true");
+        let cfg = Config::load(Some(&cfg_path)).expect("parses");
+        assert!(cfg.session.require_sentence_end, "env overrides file");
     }
 
     #[test]
