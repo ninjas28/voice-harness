@@ -203,6 +203,9 @@ pub struct PluginsConfig {
     /// Host allowlist for the `http_fetch` built-in (deny by default).
     #[serde(default)]
     pub http_fetch: HttpFetchConfig,
+    /// Built-in weather plugin settings (Open-Meteo).
+    #[serde(default)]
+    pub weather: WeatherConfig,
     /// MCP servers exposed as tools (Streamable HTTP).
     #[serde(default)]
     pub mcp: McpConfig,
@@ -213,6 +216,23 @@ pub struct HttpFetchConfig {
     /// Hosts `http_fetch` may GET. Empty = deny everything.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+}
+
+/// `[plugins.weather]`: built-in weather via Open-Meteo (keyless).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WeatherConfig {
+    /// Location used when the LLM calls `weather.get_forecast` without one
+    /// ("what's the weather?"). Empty = the tool errors and the LLM asks.
+    #[serde(default)]
+    pub default_location: String,
+    /// Full forecast endpoint URL override (self-hosted Open-Meteo).
+    /// Empty = official `https://api.open-meteo.com/v1/forecast`.
+    #[serde(default)]
+    pub api_base: String,
+    /// Full geocoding endpoint URL override. Empty = official
+    /// `https://geocoding-api.open-meteo.com/v1/search`.
+    #[serde(default)]
+    pub geocoding_base: String,
 }
 
 /// MCP (Model Context Protocol) servers exposed as tools over Streamable HTTP.
@@ -261,7 +281,11 @@ pub struct McpServerConfig {
 }
 
 fn default_enabled_plugins() -> Vec<String> {
-    vec!["time".to_string(), "http_fetch".to_string()]
+    vec![
+        "time".to_string(),
+        "http_fetch".to_string(),
+        "weather".to_string(),
+    ]
 }
 
 impl Default for Config {
@@ -311,6 +335,7 @@ impl Default for Config {
             plugins: PluginsConfig {
                 enabled: default_enabled_plugins(),
                 http_fetch: Default::default(),
+                weather: Default::default(),
                 mcp: Default::default(),
             },
         }
@@ -442,6 +467,44 @@ scopes = ["home.read"]
         let home = &cfg.plugins.mcp.servers[1];
         assert_eq!(home.auth, "oauth");
         assert_eq!(home.scopes, vec!["home.read".to_string()]);
+    }
+
+    #[test]
+    fn weather_config_defaults_and_parses_from_toml() {
+        let defaults = Config::load(None).expect("defaults load");
+        assert!(defaults.plugins.weather.default_location.is_empty());
+        assert!(defaults.plugins.weather.api_base.is_empty());
+        assert!(defaults.plugins.weather.geocoding_base.is_empty());
+        assert!(
+            defaults.plugins.enabled.contains(&"weather".to_string()),
+            "weather ships enabled by default: {:?}",
+            defaults.plugins.enabled
+        );
+
+        let path = std::env::temp_dir().join(format!("vh-weather-cfg-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"
+[plugins]
+enabled = ["time", "weather"]
+
+[plugins.weather]
+default_location = "Portland, Oregon"
+api_base = "http://127.0.0.1:8080/v1/forecast"
+geocoding_base = "http://127.0.0.1:8080/v1/search"
+"#,
+        )
+        .expect("write temp config");
+        let cfg = Config::load(Some(&path)).expect("parses");
+        assert_eq!(cfg.plugins.weather.default_location, "Portland, Oregon");
+        assert_eq!(
+            cfg.plugins.weather.api_base,
+            "http://127.0.0.1:8080/v1/forecast"
+        );
+        assert_eq!(
+            cfg.plugins.weather.geocoding_base,
+            "http://127.0.0.1:8080/v1/search"
+        );
     }
 
     /// The checked-in example config must always parse against the real

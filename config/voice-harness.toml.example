@@ -53,7 +53,15 @@ system = "You are a helpful home voice assistant. Answer concisely — 1 to 3 se
 # system_file = "system-prompt.md"   # optional: load the system prompt from a markdown file (path relative to this config); overrides `system`
 
 [plugins]
-enabled = ["time", "http_fetch"]
+enabled = ["time", "http_fetch", "weather"]
+
+# Optional weather plugin tuning (Open-Meteo, keyless). Defaults omitted =
+# official endpoints; uncomment to use a self-hosted instance or a default
+# home location for "what's the weather?".
+# [plugins.weather]
+# default_location = "Portland, Oregon"   # used when the user asks for weather without naming a place
+# api_base = ""                            # full forecast endpoint URL override
+# geocoding_base = ""                      # full geocoding endpoint URL override
 
 # Optional MCP (Model Context Protocol) servers, exposed as tools `mcp.<name>.<tool>`.
 # OAuth tokens are persisted to token_store (chmod 600, never commit it). Authorize
