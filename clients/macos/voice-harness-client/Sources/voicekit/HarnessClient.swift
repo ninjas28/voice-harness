@@ -25,10 +25,24 @@ public actor URLSessionTransport: Transport {
     private var receiveHandler: (@Sendable (String) async -> Void)?
     private var receiveLoopRunning = false
 
-    public init(url: URL) {
-        task = URLSession.shared.webSocketTask(with: url)
+    public init(url: URL, apiKey: String = "") {
+        task = URLSession.shared.webSocketTask(with: Self.makeHandshakeRequest(url: url, apiKey: apiKey))
         // Connect eagerly: a send() on a never-resumed task suspends forever.
         task.resume()
+    }
+
+    /// Builds the websocket handshake request. The API key travels ONLY in
+    /// the `Authorization: Bearer <key>` header — never in the URL, whose
+    /// query string must survive untouched (deployed clients store
+    /// `?token=…` in the server URL). An empty/whitespace key omits the
+    /// header entirely, preserving the no-auth localhost workflow.
+    public static func makeHandshakeRequest(url: URL, apiKey: String) -> URLRequest {
+        var request = URLRequest(url: url)
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !key.isEmpty {
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        return request
     }
 
     public func setReceiveHandler(_ handler: (@Sendable (String) async -> Void)?) {

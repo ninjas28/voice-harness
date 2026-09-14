@@ -12,6 +12,8 @@ public enum AppSettings {
     public static let serverURLKey = "server_url"
     public static let defaultServerURLString = "ws://127.0.0.1:8090/v1/realtime"
 
+    public static let apiKeyKey = "api_key"
+
     public static var serverURL: URL {
         let sanitized = sanitizeServerURLString(storedServerURLString ?? "") ?? ""
         return URL(string: sanitized) ?? URL(string: defaultServerURLString)!
@@ -97,6 +99,25 @@ public enum AppSettings {
             defaults.removeObject(forKey: serverURLKey)
         } else {
             defaults.set(trimmed, forKey: serverURLKey)
+        }
+    }
+
+    // MARK: - API key
+
+    /// Harness server API key, sent as `Authorization: Bearer <key>` on the
+    /// websocket handshake. Empty (the default) means no-auth localhost use.
+    public static var apiKey: String {
+        let raw = defaults.string(forKey: apiKeyKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw ?? ""
+    }
+
+    public static func setAPIKey(_ value: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            defaults.removeObject(forKey: apiKeyKey)
+        } else {
+            defaults.set(trimmed, forKey: apiKeyKey)
         }
     }
 

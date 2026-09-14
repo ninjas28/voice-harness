@@ -29,6 +29,9 @@ final class AppRuntime: ObservableObject {
     /// reconnects to the new endpoint.
     @Published var serverURLString: String =
         AppSettings.storedServerURLString ?? AppSettings.defaultServerURLString
+    /// Editable API key for the settings sheet. Persisted via `AppSettings`
+    /// and committed together with the URL (both need a reconnect to apply).
+    @Published var apiKeyString: String = AppSettings.apiKey
 
     /// The wire→UI state machine; single source of truth, mirrored above.
     let model = HarnessSessionModel()
@@ -59,12 +62,16 @@ final class AppRuntime: ObservableObject {
     /// invalid input (nothing stored), nil on success. A running session is
     /// stopped so the next start reconnects to the committed endpoint.
     @discardableResult
-    func commitServerURL(_ raw: String) -> String? {
+    func commitServerURL(_ raw: String, apiKey: String? = nil) -> String? {
         guard let sanitized = AppSettings.sanitizeServerURLString(raw) else {
             return "Enter a ws:// or wss:// URL with a host (e.g. \(AppSettings.defaultServerURLString))"
         }
         AppSettings.setServerURLString(sanitized)
         serverURLString = sanitized.isEmpty ? AppSettings.defaultServerURLString : sanitized
+        if let apiKey {
+            AppSettings.setAPIKey(apiKey)
+            apiKeyString = AppSettings.apiKey
+        }
         if running { stop() }
         return nil
     }
@@ -94,7 +101,7 @@ final class AppRuntime: ObservableObject {
         let serverURL = AppSettings.serverURL
         let player = AudioPlayer()
         player.rate = playbackRate
-        let transport = URLSessionTransport(url: serverURL)
+        let transport = URLSessionTransport(url: serverURL, apiKey: AppSettings.apiKey)
         let client = HarnessClient(transport: transport, model: model)
         do {
             try await client.start(deviceId: deviceName())

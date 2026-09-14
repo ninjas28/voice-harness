@@ -138,4 +138,26 @@ final class AppSettingsTests: XCTestCase {
         AppSettings.setServerURLString("ws://127.0.0.1:1/x")
         XCTAssertEqual(AppSettings.storedServerURLString, "ws://127.0.0.1:1/x")
     }
+
+    // MARK: - API key
+
+    func testAPIKeyDefaultsToEmpty() {
+        XCTAssertEqual(AppSettings.apiKey, "")
+    }
+
+    func testAPIKeyRoundTrips() {
+        AppSettings.setAPIKey("s3cr3t-key")
+        XCTAssertEqual(AppSettings.apiKey, "s3cr3t-key")
+    }
+
+    func testAPIKeyTrimsWhitespace() {
+        AppSettings.setAPIKey("  s3cr3t-key  ")
+        XCTAssertEqual(AppSettings.apiKey, "s3cr3t-key")
+    }
+
+    func testAPIKeyClearsToEmpty() {
+        AppSettings.setAPIKey("s3cr3t-key")
+        AppSettings.setAPIKey("   ")
+        XCTAssertEqual(AppSettings.apiKey, "")
+    }
 }
