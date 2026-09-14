@@ -132,8 +132,10 @@ need zero changes.
   exits silently). No tungstenite types leak through the link API.
 - `ws.rs` runs it as `SttMode::Realtime` per connection: lazy connect on first
   `audio.data` (dial failure → `error{stt}`, retry next chunk), raw decoded LE
-  bytes forwarded unchanged, deltas surfaced as `transcript`, completed events
-  feed the shared sentence gate (`gate_transcript`), `speech.end` sends
+  bytes forwarded unchanged, delta increments accumulated server-side and
+  surfaced as the cumulative `transcript` partial (clients replace their line —
+  forwarding raw increments would flash word-by-word), completed events feed
+  the shared sentence gate (`gate_transcript`), `speech.end` sends
   `input_audio_buffer.commit`, session start/stop/teardown drop the link and
   the next chunk reconnects. `dispatch_turn` guards against a second turn while
   one is in flight (protects both modes).

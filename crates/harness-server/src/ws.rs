@@ -192,6 +192,11 @@ struct ConnState {
     /// Sentence-end gate: transcript finalized but not yet sentence-terminal,
     /// waiting for the next utterance (or the flush deadline). Empty = none.
     held_transcript: String,
+    /// Running partial transcript in realtime mode: upstream deltas are append
+    /// increments, so they accumulate here and the client receives the
+    /// cumulative text. Reset on completed/cleared/teardown/new session so
+    /// each utterance starts fresh.
+    upstream_partial: String,
     /// When the held transcript dispatches even without punctuation (a tokio
     /// Instant is only meaningful when `held_transcript` is non-empty).
     hold_deadline: Option<tokio::time::Instant>,
@@ -221,6 +226,7 @@ impl ConnState {
             stt,
             turn: None,
             held_transcript: String::new(),
+            upstream_partial: String::new(),
             hold_deadline: None,
         }
     }
@@ -619,18 +625,35 @@ impl ConnState {
     ) {
         match ev {
             Some(Ok(SttRealtimeEvent::Delta { text })) => {
-                let _ = self.out.send(ServerMsg::Transcript { text }).await;
+                // Upstream deltas are append increments (VERIFIED from
+                // http_server.cpp): accumulate so the client sees the running
+                // partial and its transcript line grows instead of flashing
+                // word-by-word.
+                self.upstream_partial.push_str(&text);
+                let _ = self
+                    .out
+                    .send(ServerMsg::Transcript {
+                        text: self.upstream_partial.clone(),
+                    })
+                    .await;
             }
             Some(Ok(SttRealtimeEvent::Completed { text })) => {
                 // The client sees the final transcript (same as batch mode),
                 // then the gate decides: dispatch now, or hold the fragment.
+                self.upstream_partial.clear();
                 let _ = self
                     .out
                     .send(ServerMsg::Transcript { text: text.clone() })
                     .await;
                 self.gate_transcript(&text).await;
             }
-            Some(Ok(other)) => tracing::debug!(?other, "stt realtime event"),
+            Some(Ok(other)) => {
+                // A cleared upstream buffer discards the partial too.
+                if matches!(other, SttRealtimeEvent::Cleared) {
+                    self.upstream_partial.clear();
+                }
+                tracing::debug!(?other, "stt realtime event");
+            }
             Some(Err(e)) => {
                 self.teardown_upstream();
                 let _ = self
@@ -648,6 +671,9 @@ impl ConnState {
     /// Drop the upstream link + event receiver (pump exits when the command
     /// channel closes). The next audio chunk reconnects lazily.
     fn teardown_upstream(&mut self) {
+        // A fresh (re)connect starts a new upstream session with an empty
+        // buffer — the running partial is stale from here on.
+        self.upstream_partial.clear();
         match &mut self.stt {
             SttMode::Batch => {}
             SttMode::Realtime { link, events, .. } => {

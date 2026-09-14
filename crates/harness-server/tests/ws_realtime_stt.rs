@@ -397,6 +397,96 @@ async fn realtime_forwards_audio_and_surfaces_delta() {
     wait_for_binary_log(&bin_log, |log| log.len() >= 6).await;
 }
 
+/// Upstream deltas are append increments (VERIFIED protocol shape): the
+/// client must see the RUNNING partial, not each raw increment, so its
+/// transcript line grows instead of flashing word-by-word. The accumulator
+/// resets on `completed` (and clear/teardown), so the next utterance starts
+/// fresh.
+#[tokio::test]
+async fn deltas_accumulate_into_running_partial() {
+    let (url, script, bin_log, _texts, _counts, _llm) = spawn_realtime_server(|_| {}).await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(type_of(&ack), "state", "session.start ack drains first");
+
+    send_text(&mut ws, audio_msg(&speech_frame())).await;
+    wait_for_binary_log(&bin_log, |log| !log.is_empty()).await;
+
+    // First increment: cumulative partial == the increment itself.
+    script
+        .send(ScriptMsg::Text(delta_json("hello")))
+        .await
+        .expect("script sender alive");
+    let v = loop {
+        let v = recv_json(&mut ws).await;
+        if type_of(&v) != "state" {
+            break v;
+        }
+    };
+    assert_eq!(type_of(&v), "transcript", "{v}");
+    assert_eq!(v["text"], "hello", "first delta = the running partial");
+
+    // Second increment: the client sees the cumulative partial.
+    script
+        .send(ScriptMsg::Text(delta_json(" world")))
+        .await
+        .expect("script sender alive");
+    let v = loop {
+        let v = recv_json(&mut ws).await;
+        if type_of(&v) != "state" {
+            break v;
+        }
+    };
+    assert_eq!(type_of(&v), "transcript", "{v}");
+    assert_eq!(
+        v["text"], "hello world",
+        "second delta surfaces the cumulative partial"
+    );
+
+    // A completed resets the accumulator and dispatches (terminal final).
+    script
+        .send(ScriptMsg::Text(completed_json("hello world.")))
+        .await
+        .expect("script sender alive");
+    let v = loop {
+        let v = recv_json(&mut ws).await;
+        if type_of(&v) != "state" {
+            break v;
+        }
+    };
+    assert_eq!(type_of(&v), "transcript", "{v}");
+    assert_eq!(v["text"], "hello world.");
+
+    // Drain the dispatched turn so its events can't interleave below.
+    loop {
+        let v = recv_json(&mut ws).await;
+        if type_of(&v) == "turn.completed" {
+            break;
+        }
+    }
+
+    // Next utterance starts fresh — no residue from the previous partial.
+    send_text(&mut ws, audio_msg(&speech_frame())).await;
+    script
+        .send(ScriptMsg::Text(delta_json("next")))
+        .await
+        .expect("script sender alive");
+    let v = loop {
+        let v = recv_json(&mut ws).await;
+        if type_of(&v) != "state" {
+            break v;
+        }
+    };
+    assert_eq!(type_of(&v), "transcript", "{v}");
+    assert_eq!(v["text"], "next", "accumulator reset after completed");
+}
+
 // ---------------------------------------------------------------- Task 9
 
 /// A sentence-terminal `completed` event surfaces the transcript, then
