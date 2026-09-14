@@ -41,6 +41,17 @@ public final class MicCapture: @unchecked Sendable {
         try queue.sync {
             guard !running else { return }
             let input = engine.inputNode
+            // iOS: explicitly enable Apple's voice processing on the engine's
+            // input node (AEC/AGC) — without it the mic hears our own TTS and
+            // the server's VAD treats the echo as user speech. Must run before
+            // engine.start(); benign no-op when the session mode already
+            // applies voice processing. macOS keeps raw capture.
+            #if os(iOS)
+            do { try input.setVoiceProcessingEnabled(true) } catch {
+                // Older devices can refuse; session-mode AEC still applies.
+                NSLog("voice-harness: setVoiceProcessingEnabled failed: \(error)")
+            }
+            #endif
             let native = input.inputFormat(forBus: 0)
             let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000,
                                        channels: 1, interleaved: true)!
