@@ -20,6 +20,10 @@ targets:
     dependencies:
       - package: VoiceKit
         product: voicekit
+      - target: VoiceHarnessWidgets
+        embed: true
+    entitlements:
+      path: entitlements/VoiceHarness.entitlements
     info:
       path: Info.plist
       properties:
@@ -29,6 +33,25 @@ targets:
         NSMicrophoneUsageDescription: "Voice Harness streams your microphone to your own voice assistant server."
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+  VoiceHarnessWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - widgets/Sources
+    dependencies:
+      - package: VoiceKit
+        product: voicekit
+    entitlements:
+      path: entitlements/VoiceHarness.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: wtf.geese.VoiceHarnessApp.Controls
+    info:
+      path: widgets/Info.plist
+      properties:
+        CFBundleDisplayName: Voice Harness Controls
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
   VoiceHarnessAppTests:
     type: bundle.unit-test
     platform: iOS

@@ -1,5 +1,5 @@
-# XcodeGen-generated project + plists (regenerate with `xcodegen generate`)
+# XcodeGen-generated project + root plists (regenerate with `xcodegen generate`)
 VoiceHarnessApp.xcodeproj/
-Info.plist
+/Info.plist
 # Build products
 .derived/

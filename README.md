@@ -173,6 +173,10 @@ cargo run --release --example loopback -- \
 - "Toggle Voice Harness" App Shortcut: assign via Settings → Action Button →
   Shortcut, add to Home Screen from Shortcuts (ⓘ → Add to Home Screen), or
   Back Tap (Settings → Accessibility → Touch → Back Tap).
+- Control Center (iOS 18+): a "Voice Harness" control lives in the widget
+  extension (`widgets/`); tapping it foregrounds the app and auto-starts
+  listening via a shared app-group flag (`AutoStartRequest`). Add it from
+  Control Center → + → Voice Harness.
 - `UIBackgroundModes: audio` keeps the session alive when the phone locks;
   the first Start triggers the iOS mic permission prompt.
 
