@@ -50,10 +50,13 @@ fn unparseable_url_is_rejected() {
 async fn ensure_public_host_matches_literal_verdict_for_literal_hosts() {
     // Literal hosts need no DNS: ensure_public_host's verdict must agree
     // with the literal check (reject private/loopback, accept public).
+    // Name-host resolution paths are deliberately NOT tested here (no DNS
+    // in tests, per repo policy); literals exercise the same IP checks.
     assert!(ensure_public_host("http://127.0.0.1/x").await.is_err());
     assert!(ensure_public_host("http://192.168.1.5/x").await.is_err());
     assert!(ensure_public_host("http://169.254.169.254/x")
         .await
         .is_err());
-    assert!(ensure_public_host("https://example.com/x").await.is_ok());
+    // A public IP literal passes (no DNS involved).
+    assert!(ensure_public_host("http://172.66.147.243/x").await.is_ok());
 }
