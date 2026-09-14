@@ -109,6 +109,42 @@ Server → client: `state` (listening|speech|thinking|speaking), `transcript`,
 - **Pin the OS in simulator destinations** (`platform=iOS Simulator,name=iPhone 16 Pro,OS=18.5`):
   a bare `name=` resolves to OS=latest, and installed devices exist only on
   specific runtimes, so the unpinned form fails destination lookup.
+- **nemo-speech realtime transcription events** (verified from
+  `server/http/http_server.cpp`, not the docs): a delta event carries the
+  append increment in field `delta` (the full revised partial when the new one
+  doesn't extend the previous), a completed event the full text in field
+  `transcript`, and an error event nests its message under `error.message`.
+  The harness accumulates deltas by appending.
+
+## Realtime upstream STT (nemo-speech.cpp)
+
+Two STT modes behind `[stt.realtime].enabled` (default off = batch, unchanged):
+batch is harness VAD → finalized utterance → multipart WAV POST; realtime
+streams client audio frames to the ASR server's own
+`/v1/audio/transcriptions/realtime` WebSocket and receives partial/final
+transcripts. Client-visible wire protocol is identical in both modes — clients
+need zero changes.
+
+- `harness-providers/src/stt_realtime.rs` owns the upstream: `RealtimeSttClient`
+  (dial + `session.created` → `session.update` → `session.updated` handshake,
+  10 s bound) and `spawn_link` (bounded 64/64 mpsc pump; `SttRealtimeCmd::
+  Pcm/Commit/Clear` in, `Result<SttRealtimeEvent, _>` out; link dropped = pump
+  exits silently). No tungstenite types leak through the link API.
+- `ws.rs` runs it as `SttMode::Realtime` per connection: lazy connect on first
+  `audio.data` (dial failure → `error{stt}`, retry next chunk), raw decoded LE
+  bytes forwarded unchanged, deltas surfaced as `transcript`, completed events
+  feed the shared sentence gate (`gate_transcript`), `speech.end` sends
+  `input_audio_buffer.commit`, session start/stop/teardown drop the link and
+  the next chunk reconnects. `dispatch_turn` guards against a second turn while
+  one is in flight (protects both modes).
+- WebRTC VAD still runs in realtime mode — **for UI state only** (instant
+  `listening`/`speech` transitions); the upstream's `endpointing_ms` owns
+  utterance segmentation. There are no `speech_started`/`speech_stopped`
+  events in the transcription protocol (those are VoiceChat-only).
+- Tests fake the upstream with a scripted `TcpListener` +
+  `tokio_tungstenite::accept_async` server (wiremock cannot serve WebSocket) —
+  see `harness-providers/tests/stt_realtime.rs` and the copy in
+  `harness-server/tests/ws_realtime_stt.rs`.
 
 ## MCP servers (Streamable HTTP)
 

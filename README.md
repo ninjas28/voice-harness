@@ -13,7 +13,11 @@ mic audio ──▶ harness ──▶ STT (any OpenAI-compatible voice server)
 ```
 
 - **Server-side VAD** with utterance endpointing: clients just stream mic
-  frames; the harness decides when an utterance ends and a turn begins.
+  frames; the harness decides when an utterance ends and a turn begins. When
+  the STT server is nemo-speech.cpp, `[stt.realtime]` switches to streaming
+  mode instead: mic frames are forwarded to the ASR server's realtime
+  WebSocket, transcripts arrive as partials while you speak, and the LLM turn
+  dispatches ~`endpointing_ms` after you stop (see below).
 - **Two surfaces**: `POST /v1/turn` (JSON: pre-transcribed text or base64 audio
   in, transcript + response + WAV audio out) and `WS /v1/realtime`
   (streaming audio in, streaming text + audio chunks out).
@@ -58,6 +62,12 @@ swift build
 - `[server]` — bind address, `api_keys` (clients must present one as a bearer
   token), `sample_rate` (16 kHz)
 - `[stt]` / `[tts]` — voice-server base URL + API key
+- `[stt.realtime]` — optional streaming STT over the ASR server's realtime
+  transcription WebSocket (nemo-speech.cpp): `enabled` (default `false` —
+  batch mode stays the fallback), `path`
+  (`/v1/audio/transcriptions/realtime`), `endpointing_ms` (end-of-utterance
+  silence threshold, default 700), `language` (empty = model default).
+  Reuses `[stt]`'s `base_url`/`api_key` (same server).
 - `[llm]` — chat endpoint `base_url` **plus** `chat_path` (the two are
   concatenated; don't double-prefix — for Open WebUI, `base_url` ends in
   `/api` and `chat_path` starts with `/v1/`), `model`, `reasoning_effort`
@@ -97,6 +107,29 @@ sentence. Safety valves: a held fragment dispatches anyway after
 is deferred while the VAD has an utterance open), and an explicit `speech.end`
 flushes it immediately. Transcripts are echoed to the client either way, so
 the panel shows fragments as they are recognized.
+
+### Streaming STT (server-side VAD)
+
+With `[stt.realtime].enabled = true` and a nemo-speech.cpp ASR server, the
+harness stops segmenting and transcribing utterances itself: each client
+`audio.data` chunk is forwarded raw to the server's
+`/v1/audio/transcriptions/realtime` WebSocket, and the server's own
+endpointing (`endpointing_ms`) decides where utterances end. Benefits over
+batch mode:
+
+- **Live partials** — `transcript` messages arrive while you are still
+  speaking (each is the running partial, not yet the final text).
+- **Lower turn latency** — the LLM starts ~`endpointing_ms` after you stop
+  talking, instead of `session.silence_ms` + WAV upload + full-utterance
+  inference.
+- The WebRTC VAD still runs, but only to flip the client's
+  `listening`/`speech` state instantly; finals dispatch through the same
+  sentence-end gate as batch mode (see below), so `session.require_sentence_end`
+  behavior is unchanged.
+
+Reconnection is automatic and lazy: if the upstream WebSocket dies, the next
+audio chunk reconnects. `speech.end` still works — it flushes the upstream
+buffer (`input_audio_buffer.commit`) plus any held transcript fragment.
 
 ## Tests
 
@@ -144,9 +177,12 @@ cargo run --release --example loopback -- \
 
 ## Status
 
-- Harness: complete — 141 Rust tests green (fmt + clippy clean), verified
-  end-to-end against the real STT/TTS/LLM servers (text turn, audio turn, WS
-  streaming with server-side VAD).
+- Harness: complete — 184 Rust tests green (fmt + clippy clean); realtime
+  upstream STT (nemo-speech.cpp `[stt.realtime]`) implemented and
+  fake-upstream-tested; pending: live verification against the real ASR
+  server's realtime endpoint. Earlier: verified end-to-end against the real
+  STT/TTS/LLM servers (text turn, audio turn, WS streaming with server-side
+  VAD).
 - macOS client: complete — 30 Swift tests green; live-verified: mic streaming,
   server VAD turns, streamed TTS playback with adjustable speed, phase
   tracking owned by the client during playback, in-panel server URL editor.
