@@ -2,13 +2,14 @@
 //! WebSocket (`WS /v1/audio/transcriptions/realtime`; project-specific event
 //! protocol — NOT OpenAI Realtime, NOT the VoiceChat protocol).
 //!
-//! URL/event primitives plus the dial/handshake client live here; the
-//! command/event pump follows in a later task.
+//! URL/event primitives plus the dial/handshake client and the command/event
+//! pump (`spawn_link`).
 
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use harness_core::error::HarnessError;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
@@ -260,6 +261,165 @@ impl RealtimeSttSession {
             .unwrap_or("unknown upstream error");
         HarnessError::upstream("stt-realtime", 0, msg)
     }
+}
+
+/// Commands `ws.rs` sends into the pump.
+#[derive(Debug)]
+pub enum SttRealtimeCmd {
+    /// Raw LE PCM16 bytes to forward upstream as one binary frame.
+    Pcm(Vec<u8>),
+    /// Flush buffered audio upstream (`input_audio_buffer.commit`).
+    Commit,
+    /// Discard buffered audio upstream (`input_audio_buffer.clear`).
+    Clear,
+}
+
+/// Handle for one live upstream session. Dropping it closes the command
+/// channel and the pump exits silently (its events have nowhere to go).
+#[derive(Debug, Clone)]
+pub struct RealtimeSttLink {
+    cmds: mpsc::Sender<SttRealtimeCmd>,
+}
+
+impl RealtimeSttLink {
+    pub async fn send_pcm(&self, bytes: Vec<u8>) -> Result<(), HarnessError> {
+        self.cmds
+            .send(SttRealtimeCmd::Pcm(bytes))
+            .await
+            .map_err(|_| HarnessError::Network("stt realtime link closed".to_string()))
+    }
+
+    pub async fn commit(&self) -> Result<(), HarnessError> {
+        self.cmds
+            .send(SttRealtimeCmd::Commit)
+            .await
+            .map_err(|_| HarnessError::Network("stt realtime link closed".to_string()))
+    }
+
+    pub async fn clear(&self) -> Result<(), HarnessError> {
+        self.cmds
+            .send(SttRealtimeCmd::Clear)
+            .await
+            .map_err(|_| HarnessError::Network("stt realtime link closed".to_string()))
+    }
+}
+
+/// Channel bounds: 64 commands / 64 events. Backpressure instead of dropping —
+/// matching the repo's bounded-everything rule.
+const LINK_CHANNEL_BOUND: usize = 64;
+
+/// Connect + handshake (failures return `Err` to the caller, not a poisoned
+/// task), then spawn the pump task: it forwards [`SttRealtimeCmd`]s onto the
+/// upstream WebSocket and pumps parsed server events back over the returned
+/// mpsc. No tungstenite types leak into the link's public surface.
+///
+/// The event channel carries `Result<SttRealtimeEvent, HarnessError>`: a
+/// terminal `Err` means the pump is dying/died (consumer treats it as a
+/// reconnect trigger); `None` means the channel closed — either the link was
+/// dropped (pump exits silently) or the pump exited after a terminal Err.
+pub async fn spawn_link(
+    client: &RealtimeSttClient,
+    sample_rate: u32,
+) -> Result<
+    (
+        RealtimeSttLink,
+        mpsc::Receiver<Result<SttRealtimeEvent, HarnessError>>,
+    ),
+    HarnessError,
+> {
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<SttRealtimeCmd>(LINK_CHANNEL_BOUND);
+    let (ev_tx, ev_rx) =
+        mpsc::channel::<Result<SttRealtimeEvent, HarnessError>>(LINK_CHANNEL_BOUND);
+    let mut session = client.connect(sample_rate).await?;
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                cmd = cmd_rx.recv() => match cmd {
+                    // Link dropped: the consumer is gone — exit silently.
+                    None => break,
+                    Some(SttRealtimeCmd::Pcm(bytes)) => {
+                        if session.send_pcm(&bytes).await.is_err() {
+                            let _ = ev_tx
+                                .send(Err(HarnessError::Network(
+                                    "stt realtime send failed".to_string(),
+                                )))
+                                .await;
+                            break;
+                        }
+                    }
+                    Some(SttRealtimeCmd::Commit) => {
+                        if session.commit().await.is_err() {
+                            let _ = ev_tx
+                                .send(Err(HarnessError::Network(
+                                    "stt realtime send failed".to_string(),
+                                )))
+                                .await;
+                            break;
+                        }
+                    }
+                    Some(SttRealtimeCmd::Clear) => {
+                        if session.clear().await.is_err() {
+                            let _ = ev_tx
+                                .send(Err(HarnessError::Network(
+                                    "stt realtime send failed".to_string(),
+                                )))
+                                .await;
+                            break;
+                        }
+                    }
+                },
+                raw = session.next_raw() => match raw {
+                    Some(Ok(text)) => {
+                        let v: serde_json::Value = match serde_json::from_str(&text) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                let _ = ev_tx
+                                    .send(Err(HarnessError::protocol(format!(
+                                        "bad stt event: {e}"
+                                    ))))
+                                    .await;
+                                break;
+                            }
+                        };
+                        if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+                            let msg = v
+                                .get("error")
+                                .and_then(|e| e.get("message"))
+                                .and_then(|m| m.as_str())
+                                .or_else(|| v.get("message").and_then(|m| m.as_str()))
+                                .unwrap_or("unknown upstream error");
+                            let _ = ev_tx
+                                .send(Err(HarnessError::upstream("stt-realtime", 0, msg)))
+                                .await;
+                            break;
+                        }
+                        // session.created/updated stragglers and unknown types
+                        // are ignored (parse_event → None, not forwarded).
+                        if let Some(ev) = parse_event(&v) {
+                            if ev_tx.send(Ok(ev)).await.is_err() {
+                                break; // consumer gone
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        let _ = ev_tx.send(Err(e)).await;
+                        break;
+                    }
+                    // Upstream closed (or CONNECT_TIMEOUT elapsed with no
+                    // traffic): the pump cannot proceed.
+                    None => {
+                        let _ = ev_tx
+                            .send(Err(HarnessError::Network(
+                                "stt realtime upstream closed".to_string(),
+                            )))
+                            .await;
+                        break;
+                    }
+                },
+            }
+        }
+    });
+    Ok((RealtimeSttLink { cmds: cmd_tx }, ev_rx))
 }
 
 #[cfg(test)]

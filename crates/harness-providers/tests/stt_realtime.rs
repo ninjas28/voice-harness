@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use futures::{SinkExt, StreamExt};
-use harness_providers::stt_realtime::RealtimeSttClient;
+use harness_providers::stt_realtime::{spawn_link, RealtimeSttClient, SttRealtimeEvent};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
@@ -231,7 +231,131 @@ async fn fake_upstream_serves_scripted_session_and_records_binary() {
     }
 }
 
-// ---------------------------------------------------------- Task 4: connect
+// ------------------------------------------------------- Task 5: link pump
+
+/// A helper for asserting on `Result<SttRealtimeEvent, HarnessError>` events:
+/// `HarnessError` carries no `PartialEq`, so match on the expected shape.
+/// Unwraps the 10 s timeout, then matches the event itself (an Err event or a
+/// closed channel panics with the reason).
+fn expect_event(
+    ev: Result<
+        Option<Result<SttRealtimeEvent, harness_core::error::HarnessError>>,
+        tokio::time::error::Elapsed,
+    >,
+) -> SttRealtimeEvent {
+    match ev.expect("event recv timed out") {
+        Some(Ok(e)) => e,
+        Some(Err(err)) => panic!("expected event, got error: {err}"),
+        None => panic!("event channel closed before the expected event"),
+    }
+}
+
+/// `spawn_link` connects + handshakes, then forwards client PCM upstream as
+/// binary frames and scripted server events back over the event channel.
+#[tokio::test]
+async fn link_forwards_pcm_and_yields_delta_and_completed() {
+    let (base, script, recorded, _texts) = fake_upstream().await;
+    let client = RealtimeSttClient::new(&base, "/v1/audio/transcriptions/realtime", "key", 700, "");
+    let (link, mut events) = timeout(TIMEOUT, spawn_link(&client, 16_000))
+        .await
+        .expect("no timeout")
+        .expect("link");
+
+    link.send_pcm(vec![1, 2, 3, 4]).await.expect("pcm accepted");
+    script
+        .send(ScriptMsg::Text(
+            r#"{"type":"conversation.item.input_audio_transcription.delta","delta":"hel"}"#
+                .to_string(),
+        ))
+        .await
+        .expect("script sender alive");
+    script
+        .send(ScriptMsg::Text(
+            r#"{"type":"conversation.item.input_audio_transcription.completed","transcript":"hello."}"#
+                .to_string(),
+        ))
+        .await
+        .expect("script sender alive");
+
+    assert_eq!(
+        expect_event(timeout(TIMEOUT, events.recv()).await),
+        SttRealtimeEvent::Delta { text: "hel".into() }
+    );
+    assert_eq!(
+        expect_event(timeout(TIMEOUT, events.recv()).await),
+        SttRealtimeEvent::Completed {
+            text: "hello.".into()
+        }
+    );
+    // The pump forwarded the raw bytes verbatim as the last binary frame.
+    assert_eq!(
+        recorded
+            .lock()
+            .expect("binary log")
+            .last()
+            .map(Vec::as_slice),
+        Some(&[1u8, 2, 3, 4][..])
+    );
+}
+
+/// Dropping the link closes the command channel; the pump exits silently and
+/// the event channel drains to `None` (no terminal Err — the consumer left).
+#[tokio::test]
+async fn dropped_link_ends_pump_and_closes_event_channel() {
+    let (base, _script, _bin, _texts) = fake_upstream().await;
+    let client = RealtimeSttClient::new(&base, "/v1/audio/transcriptions/realtime", "key", 700, "");
+    let (link, mut events) = timeout(TIMEOUT, spawn_link(&client, 16_000))
+        .await
+        .expect("no timeout")
+        .expect("link");
+    drop(link);
+    // Unwrap the 10 s bound, then assert the channel closed cleanly (a match,
+    // since HarnessError has no PartialEq for assert_eq!).
+    match timeout(TIMEOUT, events.recv())
+        .await
+        .expect("close observed within timeout")
+    {
+        None => {} // pump exited silently when commands dried up
+        Some(res) => panic!("expected closed channel, got {res:?}"),
+    }
+}
+
+/// Commit/clear commands flow through the pump to the upstream as
+/// `input_audio_buffer.commit`/`.clear`, whose confirmations come back as
+/// `Committed`/`Cleared` events.
+#[tokio::test]
+async fn commit_and_clear_flow_through() {
+    let (base, script, _bin, _texts) = fake_upstream().await;
+    let client = RealtimeSttClient::new(&base, "/v1/audio/transcriptions/realtime", "key", 700, "");
+    let (link, mut events) = timeout(TIMEOUT, spawn_link(&client, 16_000))
+        .await
+        .expect("no timeout")
+        .expect("link");
+
+    link.commit().await.expect("commit accepted");
+    script
+        .send(ScriptMsg::Text(
+            r#"{"type":"input_audio_buffer.committed"}"#.to_string(),
+        ))
+        .await
+        .expect("script sender alive");
+    link.clear().await.expect("clear accepted");
+    script
+        .send(ScriptMsg::Text(
+            r#"{"type":"input_audio_buffer.cleared"}"#.to_string(),
+        ))
+        .await
+        .expect("script sender alive");
+
+    assert_eq!(
+        expect_event(timeout(TIMEOUT, events.recv()).await),
+        SttRealtimeEvent::Committed
+    );
+    assert_eq!(
+        expect_event(timeout(TIMEOUT, events.recv()).await),
+        SttRealtimeEvent::Cleared
+    );
+}
 
 /// Connect rides the full handshake against the fake upstream: greeting
 /// consumed, one `session.update` sent upstream (recorded verbatim),
