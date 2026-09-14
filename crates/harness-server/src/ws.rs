@@ -18,6 +18,7 @@ use futures::{SinkExt, StreamExt};
 use harness_core::sentence::{ends_sentence, join_transcripts};
 use harness_core::types::{ClientMsg, ServerMsg, SessionState};
 use harness_core::vad::{Utterance, UtteranceAssembler, VadPolicy, WebrtcVad};
+use harness_providers::stt_realtime::{spawn_link, RealtimeSttLink, SttRealtimeEvent};
 use tokio::sync::mpsc;
 
 use crate::http::RouterDeps;
@@ -97,7 +98,14 @@ pub async fn handle_socket(socket: WebSocket, session: WsState) {
     // timeout, socket error, or a clean `session.stop`. While a held
     // (sentence-incomplete) transcript waits for its continuation, a flush
     // deadline joins the select: expiring dispatches the held text as a turn.
+    // In realtime-STT mode an upstream-event poll also joins: deltas surface
+    // as transcript messages, pump failures tear the link down (lazy
+    // reconnect on the next audio chunk).
     loop {
+        // Snapshot the flush deadline before the select: awaiting it inline
+        // would pin an immutable borrow of `conn` across the whole select,
+        // colliding with the `&mut conn` the other branches' handlers need.
+        let flush_at = conn.hold_deadline().await;
         tokio::select! {
             incoming = tokio::time::timeout(idle, ws_rx.next()) => {
                 let Ok(Some(msg)) = incoming else {
@@ -121,7 +129,7 @@ pub async fn handle_socket(socket: WebSocket, session: WsState) {
                 }
             }
             _ = async {
-                match conn.hold_deadline().await {
+                match flush_at {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
                     None => std::future::pending::<()>().await,
                 }
@@ -132,6 +140,9 @@ pub async fn handle_socket(socket: WebSocket, session: WsState) {
                     break;
                 }
             }
+            ev = async { conn.recv_upstream_event().await } => {
+                conn.on_upstream_event(ev).await;
+            }
         }
     }
 
@@ -141,6 +152,23 @@ pub async fn handle_socket(socket: WebSocket, session: WsState) {
     let _ = writer.await;
 }
 
+/// Per-connection STT strategy. Chosen at connect time from
+/// `WsState.stt_realtime`; batch mode is the default and the fallback.
+enum SttMode {
+    /// Harness VAD + batch transcription (default).
+    Batch,
+    /// Stream frames to the ASR server's realtime WS; upstream endpointing
+    /// owns segmentation. VAD remains for UI state only. `link` is lazily
+    /// connected on the first audio chunk and dropped on failure (the next
+    /// chunk reconnects); `events` is the pump's event half. Both are Options
+    /// so teardown can `take()` them.
+    Realtime {
+        client: Arc<harness_providers::stt_realtime::RealtimeSttClient>,
+        link: Option<RealtimeSttLink>,
+        events: Option<mpsc::Receiver<Result<SttRealtimeEvent, harness_core::error::HarnessError>>>,
+    },
+}
+
 /// Everything one connection owns.
 struct ConnState {
     config: harness_core::config::Config,
@@ -148,10 +176,17 @@ struct ConnState {
     sessions: Arc<SessionStore>,
     /// Outbound event channel feeding the single writer task.
     out: mpsc::Sender<ServerMsg>,
-    /// Server-side VAD + utterance segmentation (one per connection).
+    /// Server-side VAD + utterance segmentation (one per connection). In
+    /// realtime mode it drives UI state only — finalized utterances are
+    /// discarded there.
     assembler: Option<UtteranceAssembler<WebrtcVad>>,
     /// Session id bound by `session.start` (device_id or generated).
     session_id: Option<String>,
+    /// Sample rate announced by `session.start` (default 16000); the upstream
+    /// realtime session is configured with it on (re)connect.
+    sample_rate: u32,
+    /// STT strategy for this connection.
+    stt: SttMode,
     /// In-flight turn task; aborted by session.stop / new session.start.
     turn: Option<tokio::task::JoinHandle<()>>,
     /// Sentence-end gate: transcript finalized but not yet sentence-terminal,
@@ -167,6 +202,14 @@ impl ConnState {
     /// accepts. Client chunks are split into pieces of at most this size.
     const VAD_FRAME_SAMPLES: usize = 480;
     fn new(session: &WsState, out: mpsc::Sender<ServerMsg>) -> Self {
+        let stt = match session.stt_realtime.clone() {
+            Some(client) => SttMode::Realtime {
+                client,
+                link: None,
+                events: None,
+            },
+            None => SttMode::Batch,
+        };
         Self {
             config: session.config.clone(),
             deps_factory: session.deps_factory.clone(),
@@ -174,6 +217,8 @@ impl ConnState {
             out,
             assembler: None,
             session_id: None,
+            sample_rate: 16_000,
+            stt,
             turn: None,
             held_transcript: String::new(),
             hold_deadline: None,
@@ -198,12 +243,21 @@ impl ConnState {
             }
         };
         match msg {
-            ClientMsg::SessionStart { device_id, .. } => {
+            ClientMsg::SessionStart {
+                device_id,
+                sample_rate,
+                ..
+            } => {
                 // A fresh session aborts any in-flight turn (interruption
                 // story) and starts a new VAD stream.
                 self.abort_turn();
                 self.assembler = Some(self.new_assembler());
                 self.session_id = Some(device_id.unwrap_or_else(next_session_id));
+                // The upstream realtime session is configured with the
+                // client's announced rate on the next (re)connect.
+                if sample_rate > 0 {
+                    self.sample_rate = sample_rate;
+                }
                 // New session = fresh conversation; any held fragment is
                 // stale (its device has moved on).
                 self.held_transcript.clear();
@@ -221,11 +275,19 @@ impl ConnState {
                         .await;
                     return false;
                 }
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(&pcm)
-                    .ok()
-                    .and_then(|bytes| samples_from_le_bytes(&bytes));
-                let Some(samples) = decoded else {
+                let decoded = base64::engine::general_purpose::STANDARD.decode(&pcm).ok();
+                let Some(bytes) = decoded else {
+                    let _ = self
+                        .out
+                        .send(ServerMsg::Error {
+                            code: "protocol".into(),
+                            message: "audio.data payload is not base64 PCM16".into(),
+                        })
+                        .await;
+                    return false;
+                };
+                let samples = samples_from_le_bytes(&bytes);
+                let Some(samples) = samples else {
                     let _ = self
                         .out
                         .send(ServerMsg::Error {
@@ -239,8 +301,57 @@ impl ConnState {
                 let mut assembler = self.assembler.take().unwrap();
                 let result = self.feed_audio(&mut assembler, &samples).await;
                 self.assembler = Some(assembler);
-                for utt in result.utterances {
-                    self.ingest_utterance(utt).await;
+                // Realtime mode: forward the decoded bytes upstream (they are
+                // already LE PCM16 — zero re-encode). Batch mode: transcribe
+                // each finalized utterance.
+                match &mut self.stt {
+                    SttMode::Batch => {
+                        for utt in result.utterances {
+                            self.ingest_utterance(utt).await;
+                        }
+                    }
+                    SttMode::Realtime {
+                        client,
+                        link,
+                        events,
+                    } => {
+                        // VAD already ran for UI state above; finalized
+                        // utterances are discarded — upstream endpointing
+                        // owns segmentation.
+                        if link.is_none() {
+                            match spawn_link(client, self.sample_rate).await {
+                                Ok((l, ev)) => {
+                                    *link = Some(l);
+                                    *events = Some(ev);
+                                }
+                                Err(e) => {
+                                    // Keep the connection alive; retry on the
+                                    // next chunk (lazy reconnect).
+                                    let _ = self
+                                        .out
+                                        .send(ServerMsg::Error {
+                                            code: "stt".into(),
+                                            message: e.to_string(),
+                                        })
+                                        .await;
+                                    return false;
+                                }
+                            }
+                        }
+                        // The decoded base64 payload, verbatim (LE PCM16).
+                        if let Err(e) = link.as_ref().unwrap().send_pcm(bytes).await {
+                            // Pump died: drop the link; the next chunk
+                            // reconnects.
+                            *link = None;
+                            let _ = self
+                                .out
+                                .send(ServerMsg::Error {
+                                    code: "stt".into(),
+                                    message: e.to_string(),
+                                })
+                                .await;
+                        }
+                    }
                 }
             }
             ClientMsg::SpeechEnd => {
@@ -434,6 +545,59 @@ impl ConnState {
     fn abort_turn(&mut self) {
         if let Some(turn) = self.turn.take() {
             turn.abort();
+        }
+    }
+
+    /// Poll the upstream realtime-STT event channel, if one is live. `None`
+    /// (no channel or channel closed) maps to `None` here so the read loop's
+    /// select branch never spins: a closed channel is a one-shot teardown.
+    async fn recv_upstream_event(
+        &mut self,
+    ) -> Option<Result<SttRealtimeEvent, harness_core::error::HarnessError>> {
+        match &mut self.stt {
+            SttMode::Batch => std::future::pending().await,
+            SttMode::Realtime { events, .. } => match events {
+                Some(ev) => ev.recv().await,
+                None => std::future::pending().await,
+            },
+        }
+    }
+
+    /// Handle one upstream realtime-STT event (or channel closure). Deltas
+    /// surface to the client as transcript messages; pump failures/closure
+    /// tear the link down — the next audio chunk reconnects lazily.
+    async fn on_upstream_event(
+        &mut self,
+        ev: Option<Result<SttRealtimeEvent, harness_core::error::HarnessError>>,
+    ) {
+        match ev {
+            Some(Ok(SttRealtimeEvent::Delta { text })) => {
+                let _ = self.out.send(ServerMsg::Transcript { text }).await;
+            }
+            Some(Ok(other)) => tracing::debug!(?other, "stt realtime event"),
+            Some(Err(e)) => {
+                self.teardown_upstream();
+                let _ = self
+                    .out
+                    .send(ServerMsg::Error {
+                        code: "stt".into(),
+                        message: e.to_string(),
+                    })
+                    .await;
+            }
+            None => self.teardown_upstream(),
+        }
+    }
+
+    /// Drop the upstream link + event receiver (pump exits when the command
+    /// channel closes). The next audio chunk reconnects lazily.
+    fn teardown_upstream(&mut self) {
+        match &mut self.stt {
+            SttMode::Batch => {}
+            SttMode::Realtime { link, events, .. } => {
+                *link = None;
+                *events = None;
+            }
         }
     }
 

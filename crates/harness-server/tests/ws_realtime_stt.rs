@@ -8,7 +8,7 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -17,7 +17,7 @@ use futures::{SinkExt, StreamExt};
 use harness_core::config::Config;
 use harness_providers::stt_realtime::RealtimeSttClient;
 use tokio::sync::mpsc;
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
@@ -215,8 +215,6 @@ async fn spawn_realtime_server(
 /// binary frame is non-empty PCM16 (even byte count).
 #[tokio::test]
 async fn realtime_forwards_audio_and_surfaces_delta() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     let (url, script, bin_log, _texts, _llm) = spawn_realtime_server(|_| {}).await;
     let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
 
@@ -225,6 +223,15 @@ async fn realtime_forwards_audio_and_surfaces_delta() {
         serde_json::json!({ "type": "session.start" }).to_string(),
     )
     .await;
+
+    // Drain the session.start acknowledgment so the next frame received is
+    // deterministically the scripted delta's transcript.
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(
+        type_of(&ack),
+        "state",
+        "session.start acknowledged with a state"
+    );
 
     // Several loud frames → VAD UI state fires upstream-independent, decoded
     // bytes are forwarded upstream.
@@ -245,7 +252,13 @@ async fn realtime_forwards_audio_and_surfaces_delta() {
         .await
         .expect("script sender alive");
 
-    let v = recv_json(&mut ws).await;
+    // VAD state transitions may interleave; the transcript must arrive.
+    let v = loop {
+        let v = recv_json(&mut ws).await;
+        if type_of(&v) != "state" {
+            break v;
+        }
+    };
     assert_eq!(
         type_of(&v),
         "transcript",
