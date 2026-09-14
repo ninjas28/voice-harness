@@ -297,7 +297,39 @@ async fn spawn_realtime_server(
     config.stt.realtime.enabled = true;
     config.stt.realtime.path = "/v1/audio/transcriptions/realtime".to_string();
     config.stt.base_url = base;
-    let (url, llm_requests) = spawn_server(config, Vec::new(), customize, Some(client)).await;
+    let (url, llm_requests) = spawn_server(config, Vec::new(), customize, Some(client), None).await;
+    (url, script, bin_log, texts, counts, llm_requests)
+}
+
+/// Like [`spawn_realtime_server`], but the router's LLM provider is a
+/// [`common::RecordingLlm`] handed to the test through `spy` — for asserting
+/// exactly what text reached the LLM.
+#[allow(clippy::type_complexity)]
+async fn spawn_realtime_server_with_llm_spy(
+    customize: impl FnOnce(&mut Config),
+    spy: std::sync::mpsc::Sender<common::RecordingLlm>,
+) -> (
+    String,
+    mpsc::Sender<ScriptMsg>,
+    BinaryLog,
+    TextLog,
+    UpstreamLog,
+    Arc<AtomicUsize>,
+) {
+    let (base, script, bin_log, texts, counts) = fake_upstream().await;
+    let client = Arc::new(RealtimeSttClient::new(
+        &base,
+        "/v1/audio/transcriptions/realtime",
+        "test-key",
+        700,
+        "",
+    ));
+    let mut config = Config::default();
+    config.stt.realtime.enabled = true;
+    config.stt.realtime.path = "/v1/audio/transcriptions/realtime".to_string();
+    config.stt.base_url = base;
+    let (url, llm_requests) =
+        spawn_server(config, Vec::new(), customize, Some(client), Some(spy)).await;
     (url, script, bin_log, texts, counts, llm_requests)
 }
 
@@ -689,4 +721,234 @@ async fn pump_death_reconnects_on_next_audio_chunk() {
     send_text(&mut ws, audio_msg(&speech_frame())).await;
     wait_for_counts_within(&counts, |c| c.accepts() >= 2, BOUNDED_WAIT).await;
     wait_for_binary_log(&bin_log, |log| log.len() > before).await;
+}
+
+// ---------------------------------------------------------------- Task 11
+
+/// Held-fragment join across two `completed` events: the non-terminal
+/// fragment is held (no dispatch), the terminal one joins it, and the LLM
+/// receives the JOINED sentence as exactly one dispatch.
+#[tokio::test]
+async fn held_fragment_join_reaches_llm_as_one_dispatch() {
+    let (spy_tx, spy_rx) = std::sync::mpsc::channel();
+    let (url, script, _bin_log, _texts, _counts, llm_requests) =
+        spawn_realtime_server_with_llm_spy(|_| {}, spy_tx).await;
+    let recorder = spy_rx.try_recv().expect("recording llm handed to the test");
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(type_of(&ack), "state", "session.start ack drains first");
+
+    // Fragment 1 endpointed upstream: non-terminal → held, NO dispatch.
+    send_text(&mut ws, audio_msg(&speech_frame())).await;
+    script
+        .send(ScriptMsg::Text(completed_json("can you look up uh")))
+        .await
+        .expect("script sender alive");
+    let held = loop {
+        let v = recv_json(&mut ws).await;
+        match type_of(&v) {
+            "transcript" => break v,
+            "state" => {}
+            _ => panic!("expected the held fragment's transcript echo: {v}"),
+        }
+    };
+    assert_eq!(held["text"], "can you look up uh");
+
+    // Fragment 2: sentence-terminal → joins the held fragment, ONE dispatch.
+    script
+        .send(ScriptMsg::Text(completed_json("the weather for tomorrow?")))
+        .await
+        .expect("script sender alive");
+    loop {
+        let v = recv_json(&mut ws).await;
+        match type_of(&v) {
+            "turn.completed" => break,
+            "error" => panic!("unexpected error frame: {v}"),
+            _ => {}
+        }
+    }
+    // The LLM must have seen exactly the joined sentence as the user text.
+    let req = recorder
+        .last_request
+        .lock()
+        .expect("recorder lock")
+        .clone()
+        .expect("LLM was called");
+    let user_texts: Vec<&str> = req
+        .messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .filter_map(|m| m.content.as_deref())
+        .collect();
+    assert_eq!(
+        user_texts,
+        vec!["can you look up uh the weather for tomorrow?"],
+        "the LLM must receive the JOINED fragment as one dispatch"
+    );
+    assert_eq!(
+        llm_requests.load(Ordering::SeqCst),
+        1,
+        "held fragment must produce exactly one LLM round"
+    );
+}
+
+/// A held fragment with no continuation dispatches after an explicit SHORT
+/// `sentence_end_wait_ms` (500 ms — AGENTS.md timer rule: set knobs
+/// explicitly, never race a config default).
+#[tokio::test]
+async fn held_fragment_dispatches_after_flush_deadline() {
+    let (url, script, _bin_log, _texts, _counts, llm_requests) =
+        spawn_realtime_server(|cfg| cfg.session.sentence_end_wait_ms = 500).await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(type_of(&ack), "state", "session.start ack drains first");
+
+    // Non-terminal final → held with a 500 ms deadline; no continuation comes.
+    send_text(&mut ws, audio_msg(&speech_frame())).await;
+    script
+        .send(ScriptMsg::Text(completed_json(
+            "can you look up the weather",
+        )))
+        .await
+        .expect("script sender alive");
+    let held = loop {
+        let v = recv_json(&mut ws).await;
+        match type_of(&v) {
+            "transcript" => break v,
+            "state" => {}
+            _ => panic!("expected the held fragment's transcript echo: {v}"),
+        }
+    };
+    assert_eq!(held["text"], "can you look up the weather");
+
+    // Close the UI-VAD utterance (silence tail) — the flush deadline is
+    // deferred while speech is open, so the utterance MUST close for the
+    // 500 ms timer to be live.
+    for _ in 0..30 {
+        send_text(&mut ws, audio_msg(&silence_frame())).await;
+    }
+
+    // The deadline (500 ms) must fire the dispatch; well past 2 s without it
+    // would mean the timer never ran.
+    let start = Instant::now();
+    loop {
+        let v = recv_json(&mut ws).await;
+        match type_of(&v) {
+            "turn.completed" => break,
+            "error" => panic!("unexpected error frame: {v}"),
+            _ => {}
+        }
+    }
+    assert!(
+        start.elapsed() >= Duration::from_millis(450),
+        "dispatch happened suspiciously early — fragment may not have been held"
+    );
+    assert!(
+        start.elapsed() <= Duration::from_secs(5),
+        "flush deadline did not fire within the 500 ms window: {:?}",
+        start.elapsed()
+    );
+    assert_eq!(llm_requests.load(Ordering::SeqCst), 1);
+}
+
+/// VAD UI states work in realtime mode independently of upstream events:
+/// `state:speech` on the first loud frame, `state:listening` after the
+/// `silence_ms` tail. Nothing is scripted on the fake upstream.
+#[tokio::test]
+async fn vad_ui_states_fire_in_realtime_mode() {
+    let (url, _script, _bin_log, _texts, _counts, _llm) = spawn_realtime_server(|_| {}).await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(type_of(&ack), "state", "session.start ack drains first");
+    assert_eq!(ack["state"], "listening", "session starts in listening");
+
+    // Loud frames → state:speech (no upstream events scripted at all).
+    for _ in 0..10 {
+        send_text(&mut ws, audio_msg(&speech_frame())).await;
+    }
+    let speech = recv_json(&mut ws).await;
+    assert_eq!(
+        type_of(&speech),
+        "state",
+        "loud frames flip the UI to speech: {speech}"
+    );
+    assert_eq!(speech["state"], "speech");
+
+    // Silence tail (~700 ms) → state:listening again.
+    for _ in 0..30 {
+        send_text(&mut ws, audio_msg(&silence_frame())).await;
+    }
+    let listening = recv_json(&mut ws).await;
+    assert_eq!(
+        type_of(&listening),
+        "state",
+        "silence tail flips the UI back to listening: {listening}"
+    );
+    assert_eq!(listening["state"], "listening");
+}
+
+/// Malformed `audio.data` (bad base64) yields an `error` message and the
+/// connection stays alive and usable — parity with batch mode.
+#[tokio::test]
+async fn malformed_audio_data_yields_error_and_connection_survives() {
+    let (url, _script, _bin_log, _texts, _counts, _llm) = spawn_realtime_server(|_| {}).await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(type_of(&ack), "state", "session.start ack drains first");
+
+    // Garbage base64 in audio.data.
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "audio.data", "pcm": "!!!not base64!!!" }).to_string(),
+    )
+    .await;
+    let err = recv_json(&mut ws).await;
+    assert_eq!(
+        type_of(&err),
+        "error",
+        "bad base64 audio.data → Error frame: {err}"
+    );
+    assert_eq!(
+        err["code"], "protocol",
+        "the protocol path reports the decode failure: {err}"
+    );
+
+    // Connection stays alive: audio flows, a completed dispatches a turn.
+    send_text(&mut ws, audio_msg(&speech_frame())).await;
+    _script
+        .send(ScriptMsg::Text(completed_json("what time is it?")))
+        .await
+        .expect("script sender alive");
+    loop {
+        let v = recv_json(&mut ws).await;
+        match type_of(&v) {
+            "turn.completed" => break,
+            "error" => panic!("connection broke after malformed audio: {v}"),
+            _ => {}
+        }
+    }
 }

@@ -282,6 +282,7 @@ async fn nonterminal_transcript_is_held_no_llm_call() {
         vec!["can you look up uh".to_string()],
         |cfg| cfg.session.sentence_end_wait_ms = 60_000,
         None,
+        None,
     )
     .await;
     let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
@@ -328,6 +329,7 @@ async fn continuation_concatenates_and_dispatches_once() {
             "the weather for tomorrow?".to_string(),
         ],
         |_| {},
+        None,
         None,
     )
     .await;
@@ -386,6 +388,7 @@ async fn held_fragment_dispatches_after_wait_timeout() {
             cfg.session.sentence_end_wait_ms = 500;
         },
         None,
+        None,
     )
     .await;
     let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
@@ -422,6 +425,7 @@ async fn speech_end_flushes_held_fragment() {
         Config::default(),
         vec!["can you look up the weather".to_string()],
         |cfg| cfg.session.sentence_end_wait_ms = 60_000,
+        None,
         None,
     )
     .await;
@@ -465,6 +469,7 @@ async fn wait_timer_defers_while_speech_is_open() {
         |cfg| {
             cfg.session.sentence_end_wait_ms = 500;
         },
+        None,
         None,
     )
     .await;

@@ -54,6 +54,34 @@ impl LlmProvider for MockLlm {
     }
 }
 
+/// LLM mock that RECORDS the last outgoing [`ChatRequest`] before delegating
+/// to the real client (same wrap-the-real-client pattern as [`MockLlm`]). For
+/// tests that must assert exactly what text reached the LLM. `Clone` shares
+/// the same underlying recorder (Arc fields).
+#[derive(Clone)]
+pub struct RecordingLlm {
+    url: String,
+    pub last_request: Arc<Mutex<Option<ChatRequest>>>,
+    pub requests: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl LlmProvider for RecordingLlm {
+    async fn stream_chat(
+        &self,
+        req: ChatRequest,
+    ) -> Result<ChatStream, harness_core::error::HarnessError> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        *self.last_request.lock().expect("recording llm lock") = Some(req.clone());
+        let client = harness_providers::llm::OpenAiLlmClient::new(
+            self.url.clone(),
+            "/v1/chat/completions",
+            "test-llm-key",
+        );
+        client.stream_chat(req).await
+    }
+}
+
 pub struct MockTts {
     url: String,
 }
@@ -158,14 +186,17 @@ pub fn audio_msg(pcm: &[i16]) -> String {
 /// One axum server + three wiremock upstreams. `transcripts` are the
 /// consecutive STT results (last one repeats); `customize` mutates the config
 /// before the router is built (session knobs, keys…); `stt_realtime` wires
-/// the streaming-STT client (`None` = batch mode).
+/// the streaming-STT client (`None` = batch mode). `llm_spy` receives the
+/// [`RecordingLlm`] the router is built with (spy on outgoing chat requests);
+/// `None` = plain [`MockLlm`].
 pub async fn spawn_server(
     mut config: Config,
     transcripts: Vec<String>,
     customize: impl FnOnce(&mut Config),
     stt_realtime: Option<Arc<RealtimeSttClient>>,
+    llm_spy: Option<std::sync::mpsc::Sender<RecordingLlm>>,
 ) -> (String, Arc<AtomicUsize>) {
-    let llm = MockServer::start().await;
+    let llm = MockServer::builder().start().await;
     let llm_requests = Arc::new(AtomicUsize::new(0));
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -178,7 +209,7 @@ pub async fn spawn_server(
         .mount(&llm)
         .await;
 
-    let tts = MockServer::start().await;
+    let tts = MockServer::builder().start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/speech"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(
@@ -193,7 +224,7 @@ pub async fn spawn_server(
     if queue.is_empty() {
         queue.push_back("what time is it".to_string());
     }
-    let stt = MockServer::start().await;
+    let stt = MockServer::builder().start().await;
     Mock::given(method("POST"))
         .and(path("/v1/audio/transcriptions"))
         .respond_with(
@@ -204,12 +235,28 @@ pub async fn spawn_server(
         .await;
 
     customize(&mut config);
-    let deps = RouterDeps {
-        config: config.clone(),
-        llm: Arc::new(MockLlm {
+    // Optional LLM spy: when a spy channel is provided, the router gets a
+    // [`RecordingLlm`] and the caller receives a clone of it through the
+    // channel (sync send before the server task starts — no race).
+    let llm_provider: Arc<dyn LlmProvider> = match llm_spy {
+        Some(spy) => {
+            let recorder = RecordingLlm {
+                url: llm.uri(),
+                last_request: Arc::new(Mutex::new(None)),
+                requests: Arc::clone(&llm_requests),
+            };
+            spy.send(recorder.clone())
+                .expect("llm spy receiver must stay open");
+            Arc::new(recorder)
+        }
+        None => Arc::new(MockLlm {
             url: llm.uri(),
             requests: llm_requests.clone(),
         }),
+    };
+    let deps = RouterDeps {
+        config: config.clone(),
+        llm: llm_provider,
         tts: Arc::new(MockTts { url: tts.uri() }),
         stt: Arc::new(ScriptedStt {
             queue: Mutex::new(queue),
@@ -225,13 +272,22 @@ pub async fn spawn_server(
         axum::serve(listener, app).await.unwrap();
     });
 
+    // Keep the wiremock servers alive for the whole test: without this task
+    // they would drop the moment `spawn_server` returns, and a dropped
+    // MockServer either recycles (pooled) or shuts down (dedicated) — both
+    // make the later LLM/TTS requests 404/connection-refuse mid-test.
+    tokio::spawn(async move {
+        std::future::pending::<()>().await;
+        drop((llm, tts, stt));
+    });
+
     (format!("ws://{addr}/v1/realtime"), llm_requests)
 }
 
 pub async fn spawn_server_with_keys(api_keys: Vec<String>) -> (String, Config) {
     let mut config = Config::default();
     config.server.api_keys = api_keys;
-    let (url, _) = spawn_server(config.clone(), Vec::new(), |_| {}, None).await;
+    let (url, _) = spawn_server(config.clone(), Vec::new(), |_| {}, None, None).await;
     (url, config)
 }
 
