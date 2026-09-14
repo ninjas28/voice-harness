@@ -309,10 +309,11 @@ async fn completed_dispatches_turn_through_sentence_gate() {
                 saw_transcript = true;
                 assert_eq!(v["text"], "what time is it?");
             }
-            "state" => match v["state"].as_str().unwrap_or("?") {
-                "thinking" => saw_thinking = true,
-                _ => {}
-            },
+            "state" => {
+                if v["state"].as_str().unwrap_or("?") == "thinking" {
+                    saw_thinking = true;
+                }
+            }
             "response.text.delta" => saw_delta = true,
             "audio.chunk" => saw_chunk = true,
             "turn.completed" => {

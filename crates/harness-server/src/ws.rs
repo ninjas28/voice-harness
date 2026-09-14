@@ -504,6 +504,13 @@ impl ConnState {
     /// accumulated) user text. The task owns the orchestrator deps and the
     /// session lock; events flow out via `out`.
     fn dispatch_turn(&mut self, text: &str) {
+        // One turn at a time: while a turn task is still running (echoing
+        // audio can produce finals mid-answer in both STT modes), a new
+        // dispatch is dropped instead of racing the session lock.
+        if self.turn.as_ref().is_some_and(|t| !t.is_finished()) {
+            tracing::warn!("turn already in flight; dropping dispatch of {text:?}");
+            return;
+        }
         let deps = (self.deps_factory)();
         let out = self.out.clone();
         let session_id = self.session_id.clone().unwrap_or_else(next_session_id);
@@ -564,8 +571,10 @@ impl ConnState {
     }
 
     /// Handle one upstream realtime-STT event (or channel closure). Deltas
-    /// surface to the client as transcript messages; pump failures/closure
-    /// tear the link down — the next audio chunk reconnects lazily.
+    /// surface to the client as transcript messages; finals surface their
+    /// text and then run the shared sentence-end gate (sentence-terminal
+    /// text dispatches the turn immediately). Pump failures/closure tear the
+    /// link down — the next audio chunk reconnects lazily.
     async fn on_upstream_event(
         &mut self,
         ev: Option<Result<SttRealtimeEvent, harness_core::error::HarnessError>>,
@@ -573,6 +582,15 @@ impl ConnState {
         match ev {
             Some(Ok(SttRealtimeEvent::Delta { text })) => {
                 let _ = self.out.send(ServerMsg::Transcript { text }).await;
+            }
+            Some(Ok(SttRealtimeEvent::Completed { text })) => {
+                // The client sees the final transcript (same as batch mode),
+                // then the gate decides: dispatch now, or hold the fragment.
+                let _ = self
+                    .out
+                    .send(ServerMsg::Transcript { text: text.clone() })
+                    .await;
+                self.gate_transcript(&text).await;
             }
             Some(Ok(other)) => tracing::debug!(?other, "stt realtime event"),
             Some(Err(e)) => {
