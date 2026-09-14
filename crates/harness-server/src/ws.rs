@@ -293,14 +293,8 @@ impl ConnState {
         FeedResult { utterances }
     }
 
-    /// Transcribe one finalized utterance and apply the sentence-end gate.
-    ///
-    /// The transcript is always forwarded to the client immediately. With
-    /// `session.require_sentence_end` on, a transcript that does not end
-    /// sentence-terminal (`. ! ? …`) is treated as a mid-sentence VAD pause:
-    /// it is concatenated onto any previously held fragment and held with a
-    /// flush deadline instead of dispatching. A sentence-terminal transcript
-    /// dispatches the whole accumulated text as one turn.
+    /// Transcribe one finalized utterance: forward the transcript to the
+    /// client immediately, then apply the shared sentence-end gate.
     async fn ingest_utterance(&mut self, utt: Utterance) {
         let deps = (self.deps_factory)();
         let text = match deps.stt.transcribe(&utt.pcm).await {
@@ -320,14 +314,29 @@ impl ConnState {
             .out
             .send(ServerMsg::Transcript { text: text.clone() })
             .await;
+        self.gate_transcript(&text).await;
+    }
+
+    /// Sentence-end gate for a finalized transcript. Empty text is ignored;
+    /// sentence-terminal text (or gate off) dispatches the accumulated text as
+    /// a turn; otherwise the fragment is held with a flush deadline. Used by
+    /// BOTH the batch path (after STT returns) and the realtime path (on
+    /// completed).
+    ///
+    /// With `session.require_sentence_end` on, a transcript that does not end
+    /// sentence-terminal (`. ! ? …`) is treated as a mid-sentence VAD pause:
+    /// it is concatenated onto any previously held fragment and held with a
+    /// flush deadline instead of dispatching. A sentence-terminal transcript
+    /// dispatches the whole accumulated text as one turn.
+    async fn gate_transcript(&mut self, text: &str) {
         if text.trim().is_empty() {
             return; // silent audio / STT found nothing: nothing to hold
         }
-        if !self.config.session.require_sentence_end || ends_sentence(&text) {
+        if !self.config.session.require_sentence_end || ends_sentence(text) {
             // Sentence complete (or the gate is off): dispatch everything.
             let held = std::mem::take(&mut self.held_transcript);
             self.hold_deadline = None;
-            let full = join_transcripts(&held, &text);
+            let full = join_transcripts(&held, text);
             if full != text {
                 // The fragment already echoed itself when it was held; send
                 // the joined view so the client's transcript shows the whole
@@ -342,7 +351,7 @@ impl ConnState {
         }
         // Mid-sentence fragment: hold it and arm the flush deadline so a
         // complete command can never hang forever if no continuation comes.
-        self.held_transcript = join_transcripts(&self.held_transcript, &text);
+        self.held_transcript = join_transcripts(&self.held_transcript, text);
         self.hold_deadline = Some(
             tokio::time::Instant::now()
                 + std::time::Duration::from_millis(self.config.session.sentence_end_wait_ms),
