@@ -164,6 +164,7 @@ final class AppRuntime: ObservableObject {
                 await player?.waitUntilDrained()
                 guard !Task.isCancelled else { return }
                 model.audioDidFinish()
+                client?.playbackDidDrain() // reopen the mic gate (echo drop)
                 if turnCompletedPending {
                     turnCompletedPending = false
                     model.apply(.turnCompleted) // audioPending now false → listening

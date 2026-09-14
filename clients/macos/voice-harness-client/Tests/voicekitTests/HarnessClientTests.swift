@@ -135,6 +135,34 @@ final class HarnessClientTests: XCTestCase {
         await client.stop()
     }
 
+    /// Regression: while the client is playing TTS (audio pending), outgoing
+    /// audio.data must be dropped — the mic hears our own speaker and the
+    /// server VAD treats the echo as user speech, re-triggering the turn loop
+    /// (loud on iOS where the speaker sits next to the mic). The gate reopens
+    /// when playback drains so normal mic streaming resumes.
+    func testOutgoingAudioDroppedWhilePlaybackPending() async throws {
+        let (client, stub, model) = makeClient()
+        try await client.start(deviceId: nil)
+        // Server sends TTS chunk → playback pending → mic gate closes.
+        await stub.simulateIncoming(#"{"type":"audio.chunk","pcm":"QUJD","seq":0}"#)
+        await client.sendAudio(base64: "RWNobw==") // mic picks up our own TTS
+        await client.sendSpeechEnd()
+        var sent = await stub.sent
+        XCTAssertEqual(sent.filter { $0.contains("audio.data") }.count, 0,
+                       "audio.data must be dropped while playback is pending")
+        XCTAssertEqual(sent.filter { $0.contains("speech.end") }.count, 0,
+                       "speech.end must be dropped too — echo is not user speech")
+        // Playback drains (runtime drain watcher → audioDidFinish +
+        // playbackDidDrain): gate reopens.
+        model.audioDidFinish()
+        client.playbackDidDrain()
+        await client.sendAudio(base64: "SGVsbG8=")
+        sent = await stub.sent
+        XCTAssertTrue(sent.contains(#"{"type":"audio.data","pcm":"SGVsbG8="}"#),
+                      "mic audio must flow again after playback drains")
+        await client.stop()
+    }
+
     /// Regression: mic and playback MUST share one AVAudioEngine. Two engines
     /// on a Bluetooth headset fight over the audio route (A2DP vs HFP) and the
     /// playback engine's route is invalidated — buffers "complete" without a

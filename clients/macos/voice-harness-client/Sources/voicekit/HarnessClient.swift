@@ -98,6 +98,13 @@ public actor URLSessionTransport: Transport {
 public final class HarnessClient: @unchecked Sendable {
     private let transport: any Transport
     private let model: HarnessSessionModel
+    /// Mic gate: closed from the first `audio.chunk` until the runtime calls
+    /// `playbackDidDrain()` (its drain watcher runs it right after
+    /// `model.audioDidFinish()`). While closed, outgoing audio.data/speech.end
+    /// are dropped — the mic hears our own TTS (no perfect AEC) and the server
+    /// VAD would treat the echo as user speech, re-triggering the turn loop.
+    private let gateLock = NSLock()
+    private var micGated = false
     /// Called for each `audio.chunk` (base64 PCM16, seq).
     public var onChunk: (@Sendable (String, Int) -> Void)?
     /// Called for every decoded server message *after* it was applied to the
@@ -119,6 +126,7 @@ public final class HarnessClient: @unchecked Sendable {
             await MainActor.run {
                 model.apply(message)
                 if case .audioChunk(let pcm, let seq) = message {
+                    self?.notePlaybackStarted()
                     self?.onChunk?(pcm, seq)
                 }
                 self?.onMessage?(message)
@@ -127,11 +135,35 @@ public final class HarnessClient: @unchecked Sendable {
         try await transport.send(ClientMessage.sessionStart(deviceId: deviceId, sampleRate: 16000).encode())
     }
 
+    /// Called by the runtime when queued playback has drained (the drain
+    /// watcher runs it right after `model.audioDidFinish()`); reopens the mic
+    /// gate so real user speech streams again.
+    public func playbackDidDrain() {
+        gateLock.lock()
+        micGated = false
+        gateLock.unlock()
+    }
+
+    private func notePlaybackStarted() {
+        gateLock.lock()
+        micGated = true
+        gateLock.unlock()
+    }
+
+    /// True while outgoing mic audio must be suppressed (playback pending).
+    private func micIsGated() -> Bool {
+        gateLock.lock()
+        defer { gateLock.unlock() }
+        return micGated
+    }
+
     public func sendAudio(base64: String) async {
+        guard !micIsGated() else { return } // echo of our own TTS — drop
         try? await transport.send(ClientMessage.audioData(pcm: base64).encode())
     }
 
     public func sendSpeechEnd() async {
+        guard !micIsGated() else { return } // echo, not user speech — drop
         try? await transport.send(ClientMessage.speechEnd.encode())
     }
 
