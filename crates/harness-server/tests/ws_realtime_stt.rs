@@ -8,7 +8,7 @@
 
 mod common;
 
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -269,4 +269,131 @@ async fn realtime_forwards_audio_and_surfaces_delta() {
     // Connection stays open and usable afterwards (nothing tore down).
     send_text(&mut ws, audio_msg(&speech_frame())).await;
     wait_for_binary_log(&bin_log, |log| log.len() >= 6).await;
+}
+
+// ---------------------------------------------------------------- Task 9
+
+/// A sentence-terminal `completed` event surfaces the transcript, then
+/// dispatches the turn through the shared sentence gate: the client sees
+/// transcript → state:thinking → response.text.delta → audio.chunk →
+/// turn.completed, and the LLM is hit exactly once.
+#[tokio::test]
+async fn completed_dispatches_turn_through_sentence_gate() {
+    let (url, script, _bin_log, _texts, llm_requests) = spawn_realtime_server(|_| {}).await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(type_of(&ack), "state", "session.start ack drains first");
+
+    // Some audio upstream (link live), then a sentence-terminal final.
+    send_text(&mut ws, audio_msg(&speech_frame())).await;
+    script
+        .send(ScriptMsg::Text(completed_json("what time is it?")))
+        .await
+        .expect("script sender alive");
+
+    let mut saw_transcript = false;
+    let mut saw_thinking = false;
+    let mut saw_delta = false;
+    let mut saw_chunk = false;
+    let mut saw_completed = false;
+    loop {
+        let v = recv_json(&mut ws).await;
+        match type_of(&v) {
+            "transcript" => {
+                saw_transcript = true;
+                assert_eq!(v["text"], "what time is it?");
+            }
+            "state" => match v["state"].as_str().unwrap_or("?") {
+                "thinking" => saw_thinking = true,
+                _ => {}
+            },
+            "response.text.delta" => saw_delta = true,
+            "audio.chunk" => saw_chunk = true,
+            "turn.completed" => {
+                assert!(!saw_completed, "only one turn.completed per turn");
+                saw_completed = true;
+                break;
+            }
+            "error" => panic!("unexpected error frame: {v}"),
+            _ => {}
+        }
+    }
+    assert!(
+        saw_transcript && saw_thinking && saw_delta && saw_chunk && saw_completed,
+        "completed dispatches the full turn pipeline"
+    );
+    assert_eq!(
+        llm_requests.load(Ordering::SeqCst),
+        1,
+        "exactly one LLM round"
+    );
+}
+
+/// A second `completed` while the first turn's task is still running must not
+/// start a second turn: still exactly one `turn.completed` and one LLM hit.
+#[tokio::test]
+async fn second_completed_while_turn_in_flight_is_dropped() {
+    let (url, script, _bin_log, _texts, llm_requests) = spawn_realtime_server(|_| {}).await;
+    let mut ws: Ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+
+    send_text(
+        &mut ws,
+        serde_json::json!({ "type": "session.start" }).to_string(),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(type_of(&ack), "state", "session.start ack drains first");
+
+    send_text(&mut ws, audio_msg(&speech_frame())).await;
+    // Two finals back-to-back: the second lands while turn 1 is in flight.
+    script
+        .send(ScriptMsg::Text(completed_json("what time is it?")))
+        .await
+        .expect("script sender alive");
+    script
+        .send(ScriptMsg::Text(completed_json("and the weather?")))
+        .await
+        .expect("script sender alive");
+
+    let mut saw_transcripts = 0;
+    let mut completed_count = 0;
+    // Collect well past the first turn's completion.
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    while Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(1500), recv_json(&mut ws)).await {
+            Ok(v) => match type_of(&v) {
+                "transcript" => saw_transcripts += 1,
+                "turn.completed" => {
+                    completed_count += 1;
+                    if completed_count == 1 {
+                        // First turn done; keep listening to catch any
+                        // unauthorized second turn.
+                        continue;
+                    }
+                }
+                "error" => panic!("unexpected error frame: {v}"),
+                _ => {}
+            },
+            Err(_) => break, // quiet window: no more events coming
+        }
+    }
+    assert!(
+        saw_transcripts >= 2,
+        "both finals echo as transcripts: {saw_transcripts}"
+    );
+    assert_eq!(
+        completed_count, 1,
+        "in-flight guard must suppress the second turn"
+    );
+    assert_eq!(
+        llm_requests.load(Ordering::SeqCst),
+        1,
+        "guard must keep the LLM at one hit"
+    );
 }
