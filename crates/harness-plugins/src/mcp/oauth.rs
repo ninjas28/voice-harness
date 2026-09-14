@@ -134,6 +134,44 @@ impl TokenStore {
     }
 }
 
+/// Ensure a URL taken from server-controlled OAuth metadata (or the
+/// WWW-Authenticate header) is safe to fetch or hand to the OS browser
+/// opener: scheme must be https, or http with a loopback host (127.0.0.1,
+/// ::1, localhost) so the wiremock-based local test setups and local
+/// development servers keep working. Everything else — plain http to remote
+/// hosts (code + PKCE-verifier exfiltration), file://, arbitrary schemes —
+/// is rejected.
+pub fn ensure_oauth_endpoint_url(url: &str) -> Result<(), String> {
+    let parsed =
+        url::Url::parse(url).map_err(|e| format!("invalid oauth endpoint url '{url}': {e}"))?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let host = parsed.host_str().unwrap_or_default();
+            if host == "localhost" {
+                return Ok(());
+            }
+            // Bracket-stripped IPv6 loopback, or an IPv4 loopback literal.
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            if host == "::1" {
+                return Ok(());
+            }
+            if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+                if ip.is_loopback() {
+                    return Ok(());
+                }
+            }
+            Err(format!(
+                "refusing non-https oauth endpoint '{url}' (only https or http on loopback is allowed)"
+            ))
+        }
+        _ => Err(format!(
+            "refusing oauth endpoint scheme '{}' from '{url}' (only https or http on loopback is allowed)",
+            parsed.scheme()
+        )),
+    }
+}
+
 /// Token-endpoint response (subset).
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenResponse {
@@ -262,6 +300,10 @@ pub async fn probe_and_discover(
             origin_of(server_url)?
         )
     };
+    // The PRM URL comes from the server-controlled WWW-Authenticate header —
+    // a malicious MCP server could point it anywhere (plain http exfil, file
+    // scheme tricks). Refuse anything but https / loopback http.
+    ensure_oauth_endpoint_url(&prm_url)?;
 
     let prm: ProtectedResourceMetadata =
         serde_json::from_value(fetch_json(&client, &prm_url).await?)
@@ -280,6 +322,13 @@ pub async fn probe_and_discover(
             })?,
         })
         .map_err(|e| format!("bad authorization-server metadata: {e}"))?;
+    // AS-metadata endpoints are equally server-controlled: validate before
+    // they are ever fetched/posted to or handed to the browser opener.
+    ensure_oauth_endpoint_url(&asm.authorization_endpoint)?;
+    ensure_oauth_endpoint_url(&asm.token_endpoint)?;
+    if let Some(reg) = &asm.registration_endpoint {
+        ensure_oauth_endpoint_url(reg)?;
+    }
     Ok((prm, asm))
 }
 
@@ -350,6 +399,7 @@ pub async fn register_client(
     redirect_uri: &str,
     client_name: &str,
 ) -> Result<String, String> {
+    ensure_oauth_endpoint_url(registration_endpoint)?;
     let client = reqwest::Client::builder()
         .timeout(DISCOVERY_TIMEOUT)
         .build()
@@ -629,6 +679,10 @@ pub async fn run_authorization_flow(
     );
 
     println!("Open this URL to authorize '{}':\n  {url}", server.name);
+    // `url` embeds AS-metadata endpoints (already validated in
+    // probe_and_discover) — re-check defensively before spawning the OS
+    // opener so a crafted scheme can never reach open/xdg-open.
+    ensure_oauth_endpoint_url(&url)?;
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(&url).spawn();
     #[cfg(not(target_os = "macos"))]
@@ -802,6 +856,26 @@ mod tests {
             .await
             .expect_err("must fail");
         assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn ensure_oauth_endpoint_url_allows_https_and_loopback_http() {
+        assert!(ensure_oauth_endpoint_url("https://as.example.com/x").is_ok());
+        assert!(ensure_oauth_endpoint_url("http://127.0.0.1:9/x").is_ok());
+        assert!(ensure_oauth_endpoint_url("http://localhost:8080/token").is_ok());
+        assert!(ensure_oauth_endpoint_url("http://[::1]:8080/token").is_ok());
+    }
+
+    #[test]
+    fn ensure_oauth_endpoint_url_rejects_plain_http_and_other_schemes() {
+        assert!(ensure_oauth_endpoint_url("http://example.com/x").is_err());
+        assert!(ensure_oauth_endpoint_url("file:///x").is_err());
+        assert!(ensure_oauth_endpoint_url("ftp://as.example.com/x").is_err());
+        assert!(ensure_oauth_endpoint_url("not a url").is_err());
+        // Private-range (but non-loopback) LAN hosts are also refused: the
+        // metadata chain is server-controlled and must not be a pivot into
+        // the LAN over plain http.
+        assert!(ensure_oauth_endpoint_url("http://192.168.1.5/x").is_err());
     }
 
     #[test]
