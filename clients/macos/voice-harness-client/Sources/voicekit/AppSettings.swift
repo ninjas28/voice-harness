@@ -30,6 +30,11 @@ public enum AppSettings {
     /// Returns the trimmed string when it is a well-formed ws:// or wss:// URL
     /// with a host, `""` for an empty/clearing entry, and `nil` when the entry
     /// is unusable (callers must ignore it — never store a broken URL).
+    ///
+    /// Cleartext `ws://` is only allowed to loopback, private/link-local
+    /// (RFC1918 + 169.254, or a `*.local` mDNS name) hosts — sending
+    /// unencrypted microphone audio across the public internet is never
+    /// acceptable. `wss://` is valid for any host.
     public static func sanitizeServerURLString(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
@@ -38,7 +43,52 @@ public enum AppSettings {
               scheme == "ws" || scheme == "wss",
               let host = url.host, !host.isEmpty
         else { return nil }
+        if scheme == "ws", !isLocalCleartextHost(host) { return nil }
         return trimmed
+    }
+
+    /// True when a cleartext `ws://` host is acceptable: loopback, private
+    /// (RFC1918), link-local (169.254), or a `*.local` mDNS name.
+    private static func isLocalCleartextHost(_ host: String) -> Bool {
+        let lowered = host.lowercased()
+        if lowered == "localhost" { return true }
+        if lowered.hasSuffix(".local") { return true }
+
+        // `url.host` may keep IPv6 brackets (older Foundation) or strip them
+        // (swift-foundation); parse the bare address either way.
+        var bare = lowered
+        if bare.hasPrefix("["), bare.hasSuffix("]") {
+            bare = String(bare.dropFirst().dropLast())
+        }
+
+        var v4 = in_addr()
+        if inet_pton(AF_INET, bare, &v4) == 1 {
+            let octets = withUnsafeBytes(of: v4) { Array($0) }
+            switch octets[0] {
+            case 127: // loopback
+                return true
+            case 10: // RFC1918 10/8
+                return true
+            case 172: // RFC1918 172.16/12
+                return (16...31).contains(octets[1])
+            case 192: // RFC1918 192.168/16
+                return octets[1] == 168
+            case 169: // link-local 169.254/16
+                return octets[1] == 254
+            default:
+                return false
+            }
+        }
+
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, bare, &v6) == 1 {
+            // IPv6 loopback (::1): fifteen zero bytes, last byte 1.
+            let bytes = withUnsafeBytes(of: v6) { Array($0) }
+            return bytes[15] == 1 && bytes.prefix(15).allSatisfy { $0 == 0 }
+        }
+
+        // Non-literal hostname: treat as public for cleartext.
+        return false
     }
 
     public static func setServerURLString(_ value: String) {

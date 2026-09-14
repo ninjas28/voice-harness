@@ -21,8 +21,8 @@ final class AppSettingsTests: XCTestCase {
 
     func testSanitizeTrimsWhitespace() {
         XCTAssertEqual(
-            AppSettings.sanitizeServerURLString("  ws://host:8090/v1/realtime  "),
-            "ws://host:8090/v1/realtime")
+            AppSettings.sanitizeServerURLString("  ws://192.168.10.93:8090/v1/realtime  "),
+            "ws://192.168.10.93:8090/v1/realtime")
     }
 
     func testSanitizeAcceptsWss() {
@@ -49,6 +49,70 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertNil(AppSettings.sanitizeServerURLString("ws:///v1/realtime"))
     }
 
+    // MARK: - cleartext ws:// host policy
+
+    func testSanitizeAcceptsLoopbackWS() {
+        XCTAssertEqual(
+            AppSettings.sanitizeServerURLString("ws://127.0.0.1"),
+            "ws://127.0.0.1")
+        XCTAssertEqual(
+            AppSettings.sanitizeServerURLString("ws://127.0.0.1:8090/v1/realtime"),
+            "ws://127.0.0.1:8090/v1/realtime")
+        XCTAssertEqual(
+            AppSettings.sanitizeServerURLString("ws://[::1]:8090/v1/realtime"),
+            "ws://[::1]:8090/v1/realtime")
+        XCTAssertEqual(
+            AppSettings.sanitizeServerURLString("ws://localhost:8090/v1/realtime"),
+            "ws://localhost:8090/v1/realtime")
+    }
+
+    func testSanitizeAcceptsPrivateAndLinkLocalWS() {
+        XCTAssertEqual(
+            AppSettings.sanitizeServerURLString("ws://192.168.10.93:8090/v1/realtime"),
+            "ws://192.168.10.93:8090/v1/realtime")
+        XCTAssertEqual(
+            AppSettings.sanitizeServerURLString("ws://10.1.2.3:8090/v1/realtime"),
+            "ws://10.1.2.3:8090/v1/realtime")
+        XCTAssertEqual(
+            AppSettings.sanitizeServerURLString("ws://172.16.5.5:8090/v1/realtime"),
+            "ws://172.16.5.5:8090/v1/realtime")
+        XCTAssertEqual(
+            AppSettings.sanitizeServerURLString("ws://172.31.255.1:8090/v1/realtime"),
+            "ws://172.31.255.1:8090/v1/realtime")
+        XCTAssertEqual(
+            AppSettings.sanitizeServerURLString("ws://169.254.10.20:8090/v1/realtime"),
+            "ws://169.254.10.20:8090/v1/realtime")
+        XCTAssertEqual(
+            AppSettings.sanitizeServerURLString("ws://voicebox.local:8090/v1/realtime"),
+            "ws://voicebox.local:8090/v1/realtime")
+    }
+
+    func testSanitizeRejectsPublicCleartextWS() {
+        XCTAssertNil(
+            AppSettings.sanitizeServerURLString("ws://voicebox.zippystation.com/v1/realtime"))
+        XCTAssertNil(AppSettings.sanitizeServerURLString("ws://example.com/v1/realtime"))
+        XCTAssertNil(AppSettings.sanitizeServerURLString("ws://8.8.8.8:8090/v1/realtime"))
+        // RFC1918 boundaries: 172.32.0.0/12-adjacent addresses are public.
+        XCTAssertNil(AppSettings.sanitizeServerURLString("ws://172.32.0.1:8090/v1/realtime"))
+        XCTAssertNil(AppSettings.sanitizeServerURLString("ws://11.0.0.1:8090/v1/realtime"))
+        // A non-IPv4 hostname is treated as public for cleartext.
+        XCTAssertNil(AppSettings.sanitizeServerURLString("ws://myserver.example/v1/realtime"))
+    }
+
+    func testSanitizeAcceptsWssAnyHost() {
+        XCTAssertEqual(
+            AppSettings.sanitizeServerURLString("wss://voicebox.zippystation.com/v1/realtime"),
+            "wss://voicebox.zippystation.com/v1/realtime")
+    }
+
+    func testSanitizePreservesTokenQueryRoundTrip() {
+        let stored = "ws://192.168.10.93:8090/v1/realtime?token=s3cr3t-token-value"
+        XCTAssertEqual(AppSettings.sanitizeServerURLString(stored), stored)
+        AppSettings.setServerURLString(stored)
+        XCTAssertEqual(AppSettings.storedServerURLString, stored)
+        XCTAssertEqual(AppSettings.serverURL.absoluteString, stored)
+    }
+
     // MARK: - setServerURLString / serverURL round trip
 
     func testSetThenReadRoundTrips() {
@@ -71,7 +135,7 @@ final class AppSettingsTests: XCTestCase {
 
     func testStoredServerURLStringReturnsStoredValue() {
         XCTAssertNil(AppSettings.storedServerURLString)
-        AppSettings.setServerURLString("ws://host:1/x")
-        XCTAssertEqual(AppSettings.storedServerURLString, "ws://host:1/x")
+        AppSettings.setServerURLString("ws://127.0.0.1:1/x")
+        XCTAssertEqual(AppSettings.storedServerURLString, "ws://127.0.0.1:1/x")
     }
 }
