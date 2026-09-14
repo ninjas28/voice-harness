@@ -95,6 +95,12 @@ impl WebSearchPlugin {
     }
 
     async fn fetch(&self, url: &str) -> Result<Value, String> {
+        // SSRF guard: the LLM supplies this URL. Reject private/loopback
+        // literals and non-http(s) schemes on sight, then resolve the host
+        // and refuse anything that lands on a non-public IP — all before
+        // anything is forwarded to the Firecrawl service.
+        check_url_literal(url)?;
+        ensure_public_host(url).await?;
         let parsed = self
             .post_json(SCRAPE_PATH, json!({ "url": url, "formats": ["markdown"] }))
             .await?;
@@ -110,6 +116,98 @@ impl WebSearchPlugin {
             .to_string();
         Ok(json!({ "title": title, "markdown": markdown }))
     }
+}
+
+/// Link-local check across both IP versions (IPv4 169.254.0.0/16, IPv6
+/// fe80::/10). `IpAddr` only exposes `is_link_local` on `Ipv4Addr`.
+fn is_link_local_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+    }
+}
+
+/// Validate a URL's literal text before it is forwarded anywhere: scheme must
+/// be http or https, and the HOST must not be a loopback/private/link-local/
+/// unique-local IP literal. Pure text check (no DNS) — the first, cheap half
+/// of the SSRF guard; [`ensure_public_host`] adds name resolution.
+pub fn check_url_literal(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid url '{url}': {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(format!(
+                "refusing url scheme '{other}' (only http/https): {url}"
+            ))
+        }
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err(format!("url has no host: {url}"));
+    };
+    // Strip IPv6 brackets before parsing.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_loopback() || ip.is_unspecified() || is_link_local_ip(ip) {
+            return Err(format!(
+                "refusing request to non-public host '{host}': {url}"
+            ));
+        }
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                if v4.is_private() {
+                    return Err(format!("refusing request to private host '{host}': {url}"));
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                // Unique-local IPv6 (fc00::/7): not exposed by std.
+                if (v6.segments()[0] & 0xfe00) == 0xfc00 {
+                    return Err(format!("refusing request to private host '{host}': {url}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Full SSRF guard for a fetch target: [`check_url_literal`] first, then
+/// resolve the host and reject when ANY resolved IP is loopback/private/
+/// link-local/ULA (DNS-rebinding-style pivots: a public name resolving to a
+/// LAN address), or when resolution fails outright.
+pub async fn ensure_public_host(url: &str) -> Result<(), String> {
+    check_url_literal(url)?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid url '{url}': {e}"))?;
+    let Some(host) = parsed.host_str() else {
+        return Err(format!("url has no host: {url}"));
+    };
+    // lookup_host requires a `host:port` target; fall back to the scheme's
+    // default port when the URL doesn't carry one explicitly.
+    let port = parsed.port_or_known_default();
+    let target = format!("{host}:{}", port.unwrap_or(80));
+    let addrs = tokio::net::lookup_host(&target)
+        .await
+        .map_err(|e| format!("cannot resolve host '{host}': {e}"))?;
+    for addr in addrs {
+        let ip = addr.ip();
+        if ip.is_loopback() || ip.is_unspecified() || is_link_local_ip(ip) {
+            return Err(format!(
+                "refusing request to non-public host '{host}' (resolves to {ip})"
+            ));
+        }
+        match ip {
+            std::net::IpAddr::V4(v4) if v4.is_private() => {
+                return Err(format!(
+                    "refusing request to private host '{host}' (resolves to {ip})"
+                ));
+            }
+            std::net::IpAddr::V6(v6) if (v6.segments()[0] & 0xfe00) == 0xfc00 => {
+                return Err(format!(
+                    "refusing request to private host '{host}' (resolves to {ip})"
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Firecrawl's human-readable error from a JSON payload, for surfacing.
