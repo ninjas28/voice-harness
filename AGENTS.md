@@ -109,6 +109,12 @@ Server → client: `state` (listening|speech|thinking|speaking), `transcript`,
 - **Pin the OS in simulator destinations** (`platform=iOS Simulator,name=iPhone 16 Pro,OS=18.5`):
   a bare `name=` resolves to OS=latest, and installed devices exist only on
   specific runtimes, so the unpinned form fails destination lookup.
+- **ControlWidget intents must live in the app target too**: `openAppWhenRun`
+  only takes effect when the AppIntent type is compiled into the app (not
+  just the widget extension) — otherwise the control tap runs in the
+  extension process and the app never opens. Share the intent file across
+  both targets and verify the app's `Metadata.appintents/extract.actionsdata`
+  lists the intent.
 - **nemo-speech realtime transcription events** (verified from
   `server/http/http_server.cpp`, not the docs): a delta event carries the
   append increment in field `delta` (the full revised partial when the new one
