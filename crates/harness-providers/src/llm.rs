@@ -110,8 +110,15 @@ struct ChunkMapper {
     finish_reason: Option<String>,
 }
 
+/// Hard cap on tool-call accumulator slots. `index` comes from upstream JSON
+/// (model-controlled, prompt-injectable); without a cap, `ensure_slot` grows
+/// the Vec until the index resolves — effectively unbounded memory. 64
+/// concurrent tool calls is far above anything a real model emits.
+const MAX_TOOL_CALL_SLOTS: usize = 64;
+
 impl ChunkMapper {
-    /// Grow the accumulator vector so `index` always resolves.
+    /// Grow the accumulator vector so `index` always resolves. Indices at or
+    /// above [`MAX_TOOL_CALL_SLOTS`] are refused by `apply` instead of grown.
     fn ensure_slot(&mut self, idx: usize) {
         while self.tool_acc.len() <= idx {
             self.tool_acc.push(ToolCallAcc::default());
@@ -138,6 +145,12 @@ impl ChunkMapper {
                 events.push(LlmEvent::Delta(text));
             }
             for frag in delta.tool_calls.into_iter().flatten() {
+                if frag.index >= MAX_TOOL_CALL_SLOTS {
+                    return Err(HarnessError::protocol(format!(
+                        "tool_call fragment index {} exceeds the maximum of {MAX_TOOL_CALL_SLOTS}",
+                        frag.index
+                    )));
+                }
                 self.ensure_slot(frag.index);
                 let acc = &mut self.tool_acc[frag.index];
                 if let Some(id) = frag.id {

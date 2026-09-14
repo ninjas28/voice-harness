@@ -144,6 +144,48 @@ async fn accumulates_tool_call_fragments_by_index() {
 }
 
 #[tokio::test]
+async fn tool_call_fragment_with_absurd_index_is_a_protocol_error() {
+    // Regression: `index` comes from upstream JSON and is prompt-injectable.
+    // ensure_slot used to grow the accumulator Vec until the index resolved —
+    // an index of 100_000 means 100k allocations (and effectively unbounded
+    // growth for larger indices). Must map to a protocol error instead.
+    let server = MockServer::start().await;
+    let body = sse_body(&[chunk(
+        json!({ "tool_calls": [{ "index": 100000, "id": "call_x", "type": "function",
+            "function": { "name": "get_time", "arguments": "" } }] }),
+        None,
+    )]);
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(sse_response(body))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client
+            .stream_chat(chat_req())
+            .await
+            .expect("stream_chat opens")
+            .collect::<Vec<Result<LlmEvent, _>>>(),
+    )
+    .await
+    .expect("stream terminates within 10s (no hang/OOM)");
+
+    // The absurd index must surface as an Err event, not a hang or OOM.
+    let err = result
+        .into_iter()
+        .find_map(|r| r.err())
+        .expect("absurd tool-call index must fail the stream");
+    let text = err.to_string();
+    assert!(
+        text.contains("protocol error") && text.contains("tool_call"),
+        "expected a protocol error naming tool_call slots, got: {text}"
+    );
+}
+
+#[tokio::test]
 async fn falls_back_to_non_stream_when_server_rejects_streaming() {
     let server = MockServer::start().await;
     Mock::given(body_partial_json(json!({ "stream": true })))
