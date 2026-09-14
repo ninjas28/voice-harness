@@ -143,8 +143,10 @@ impl WeatherPlugin {
         days: u32,
         units: Units,
     ) -> Result<Value, String> {
+        // Open-Meteo rejects `millimeter` with a 400 ("Cannot initialize
+        // PrecipitationUnit from invalid String value"); `mm` is accepted.
         let (temp_unit, wind_unit, precip_unit) = match units {
-            Units::Metric => ("celsius", "kmh", "millimeter"),
+            Units::Metric => ("celsius", "kmh", "mm"),
             Units::Imperial => ("fahrenheit", "mph", "inch"),
         };
         let client = reqwest::Client::builder()
@@ -535,6 +537,35 @@ mod tests {
         assert_eq!(out["today"]["precip_probability_pct"], 10);
         assert_eq!(out["days"].as_array().map(Vec::len), Some(2));
         assert_eq!(out["days"][1]["condition"], "Overcast");
+    }
+
+    /// Regression: Open-Meteo rejects `precipitation_unit=millimeter` with a
+    /// 400 ("Cannot initialize PrecipitationUnit from invalid String value"),
+    /// so the metric request must send the accepted `mm` spelling.
+    #[tokio::test]
+    async fn forecast_metric_precipitation_unit_is_mm() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(FORECAST_JSON))
+            .mount(&server)
+            .await;
+
+        let p = WeatherPlugin::new(String::new()).with_endpoints(server.uri(), String::new());
+        p.fetch_forecast(&geo_paris(), 1, Units::Metric)
+            .await
+            .expect("shaped");
+        let requests = server.received_requests().await.expect("requests");
+        let url = requests[0].url.to_string();
+        assert!(
+            url.contains("precipitation_unit=mm"),
+            "metric forecast must send precipitation_unit=mm: {url}"
+        );
+        assert!(
+            !url.contains("precipitation_unit=millimeter"),
+            "upstream rejects 'millimeter': {url}"
+        );
+        // The LLM-facing label still speaks in millimeters.
+        assert!(url.contains("temperature_unit=celsius"), "{url}");
     }
 
     #[tokio::test]
