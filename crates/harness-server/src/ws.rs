@@ -262,6 +262,11 @@ impl ConnState {
                 // stale (its device has moved on).
                 self.held_transcript.clear();
                 self.hold_deadline = None;
+                // The upstream link belongs to the previous session: tear it
+                // down so the upstream sees the socket close (lazy reconnect
+                // re-dials with the new session's sample rate on the next
+                // audio chunk).
+                self.teardown_upstream();
                 self.send_state(SessionState::Listening).await;
             }
             ClientMsg::AudioData { pcm } => {
@@ -354,21 +359,54 @@ impl ConnState {
                     }
                 }
             }
-            ClientMsg::SpeechEnd => {
-                if let Some(assembler) = self.assembler.as_mut() {
-                    if let Some(utt) = assembler.force_end() {
-                        self.send_state(SessionState::Listening).await;
-                        self.ingest_utterance(utt).await;
-                    } else if !self.held_transcript.is_empty() {
-                        // No utterance open, but a held fragment is waiting:
-                        // the user (or client logic) says "that's all" —
-                        // dispatch it now, don't wait out the timer.
+            ClientMsg::SpeechEnd => match &mut self.stt {
+                SttMode::Realtime { link, .. } => {
+                    // Upstream owns segmentation: `speech.end` flushes the
+                    // buffered audio (`input_audio_buffer.commit`) instead
+                    // of transcribing locally. A dead pump drops the link
+                    // (the next chunk reconnects lazily).
+                    let committed = match link.as_ref() {
+                        Some(l) => l.commit().await.is_ok(),
+                        None => true,
+                    };
+                    if !committed {
+                        *link = None;
+                    }
+                    // Same UI tail as batch, minus transcription: the
+                    // force-ended utterance is discarded — upstream
+                    // endpointing owns the text.
+                    if let Some(assembler) = self.assembler.as_mut() {
+                        if assembler.force_end().is_some() {
+                            self.send_state(SessionState::Listening).await;
+                        }
+                    }
+                    // "That's all": a held fragment dispatches now, deadline
+                    // or not — the identical tail batch mode runs.
+                    if !self.held_transcript.is_empty() {
                         self.flush_held().await;
                     }
                 }
-            }
+                SttMode::Batch => {
+                    if let Some(assembler) = self.assembler.as_mut() {
+                        if let Some(utt) = assembler.force_end() {
+                            self.send_state(SessionState::Listening).await;
+                            self.ingest_utterance(utt).await;
+                        } else if !self.held_transcript.is_empty() {
+                            // No utterance open, but a held fragment is
+                            // waiting: the user (or client logic) says
+                            // "that's all" — dispatch it now, don't wait out
+                            // the timer.
+                            self.flush_held().await;
+                        }
+                    }
+                }
+            },
             ClientMsg::SessionStop => {
                 self.abort_turn();
+                // The upstream link belongs to the session: stop = tear it
+                // down (the pump exits when the command channel closes, the
+                // upstream sees the socket close).
+                self.teardown_upstream();
                 self.assembler = None;
                 self.session_id = None;
                 self.held_transcript.clear();
