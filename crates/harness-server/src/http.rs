@@ -255,6 +255,36 @@ fn query_token(query: Option<&str>) -> Option<String> {
     })
 }
 
+/// The request URI as logged by [`RedactedMakeSpan`]: PATH ONLY. Query strings
+/// carry `?token=<api key>` on WebSocket handshakes (browsers cannot set
+/// headers there) and must never reach logs, so everything after `?` is
+/// dropped; an empty request target normalizes to `/`.
+fn redacted_uri(uri: &axum::http::Uri) -> String {
+    let path = uri.path();
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+/// [`tower_http::trace::MakeSpan`] that records method, URI PATH, and version —
+/// never the full URI (the query string holds the `token=` API key).
+#[derive(Debug, Clone, Default)]
+struct RedactedMakeSpan;
+
+impl<B> tower_http::trace::MakeSpan<B> for RedactedMakeSpan {
+    fn make_span(&mut self, request: &axum::http::Request<B>) -> tracing::Span {
+        tracing::span!(
+            tracing::Level::DEBUG,
+            "request",
+            method = %request.method(),
+            uri = %redacted_uri(request.uri()),
+            version = ?request.version(),
+        )
+    }
+}
+
 /// Build the application router (also the unit under test). Serves
 /// `POST /v1/turn`, `GET /v1/realtime` (WS upgrade), and `GET /healthz`,
 /// all behind the auth middleware.
@@ -262,8 +292,11 @@ pub fn build_router(deps: RouterDeps) -> Router {
     let auth_config = Arc::new(deps.config.clone());
     let ws_state = crate::ws::WsState::from_router_deps(&deps);
     // The two routes use different state types (RouterDeps vs WsState), so
-    // each sub-router is built with its own state and merged; the auth +
-    // trace layers wrap the merged result and apply to both.
+    // each sub-router is built with its own state and merged; the auth + trace
+    // layers wrap the merged result and apply to both. The trace span records
+    // the request URI PATH ONLY — query strings carry `?token=<api key>` on
+    // WS handshakes (browsers cannot set headers there) and must never reach
+    // logs.
     let api = Router::new()
         .route("/v1/turn", post(turn_handler))
         .route("/healthz", get(|| async { "ok" }))
@@ -273,5 +306,31 @@ pub fn build_router(deps: RouterDeps) -> Router {
         .with_state(ws_state);
     api.merge(ws)
         .layer(middleware::from_fn_with_state(auth_config, require_api_key))
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(tower_http::trace::TraceLayer::new_for_http().make_span_with(RedactedMakeSpan))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacted_uri_drops_query_string() {
+        let uri: axum::http::Uri = "/v1/realtime?token=super-secret".parse().unwrap();
+        assert_eq!(redacted_uri(&uri), "/v1/realtime");
+    }
+
+    #[test]
+    fn redacted_uri_path_only_unchanged() {
+        let uri: axum::http::Uri = "/v1/turn".parse().unwrap();
+        assert_eq!(redacted_uri(&uri), "/v1/turn");
+    }
+
+    #[test]
+    fn redacted_uri_empty_path_and_empty_query() {
+        // Default (empty) URI: path() normalizes to "/".
+        assert_eq!(redacted_uri(&axum::http::Uri::default()), "/");
+        // Bare authority-less target with an empty path + a query.
+        let uri: axum::http::Uri = "/?x=1".parse().unwrap();
+        assert_eq!(redacted_uri(&uri), "/");
+    }
 }
