@@ -17,6 +17,7 @@ targets:
     platform: iOS
     sources:
       - Sources
+      - Shared
     dependencies:
       - package: VoiceKit
         product: voicekit
@@ -24,6 +25,9 @@ targets:
         embed: true
     entitlements:
       path: entitlements/VoiceHarness.entitlements
+    settings:
+      base:
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: APP
     info:
       path: Info.plist
       properties:
@@ -37,7 +41,7 @@ targets:
     type: app-extension
     platform: iOS
     sources:
-      - widgets/Sources
+      - Shared
     dependencies:
       - package: VoiceKit
         product: voicekit
