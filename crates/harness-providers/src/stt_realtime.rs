@@ -2,8 +2,15 @@
 //! WebSocket (`WS /v1/audio/transcriptions/realtime`; project-specific event
 //! protocol — NOT OpenAI Realtime, NOT the VoiceChat protocol).
 //!
-//! Pure URL/event primitives live here; the dial/handshake client and the
-//! pump follow in later tasks.
+//! URL/event primitives plus the dial/handshake client live here; the
+//! command/event pump follows in a later task.
+
+use std::time::Duration;
+
+use futures::{SinkExt, StreamExt};
+use harness_core::error::HarnessError;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 /// Build the upstream WS URL: scheme swap (`http://`→`ws://`,
 /// `https://`→`wss://`), path append, optional `?api_key=` (percent-encoded).
@@ -100,6 +107,159 @@ pub enum SttRealtimeEvent {
     },
     Committed,
     Cleared,
+}
+
+/// Handshake/IO timeout for one upstream round trip (dial, greeting, update
+/// round trip).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Client-side half of the upstream realtime STT WebSocket. Cheap to clone
+/// into tests/constructors; state lives in the [`RealtimeSttSession`] a
+/// successful [`RealtimeSttClient::connect`] returns.
+#[derive(Debug, Clone)]
+pub struct RealtimeSttClient {
+    url: String,
+    endpointing_ms: u64,
+    language: String,
+}
+
+impl RealtimeSttClient {
+    pub fn new(
+        base_url: &str,
+        realtime_path: &str,
+        api_key: &str,
+        endpointing_ms: u64,
+        language: &str,
+    ) -> Self {
+        Self {
+            url: ws_url_from_base(base_url, realtime_path, api_key),
+            endpointing_ms,
+            language: language.to_string(),
+        }
+    }
+
+    /// Dial the upstream and ride out the handshake: consume the server's
+    /// `session.created` greeting, send one `session.update`, await
+    /// `session.updated`. An `error` event (nested `error.message`) or the
+    /// [`CONNECT_TIMEOUT`] bound fails the handshake.
+    pub async fn connect(&self, sample_rate: u32) -> Result<RealtimeSttSession, HarnessError> {
+        let (ws, _resp) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(&self.url))
+            .await
+            .map_err(|_| HarnessError::Network("stt realtime dial timeout".to_string()))?
+            .map_err(|e| HarnessError::Network(format!("stt realtime dial failed: {e}")))?;
+        let mut session = RealtimeSttSession { ws };
+        // The server speaks first per docs/api.md; the greeting may still
+        // race our update, so tolerate either order.
+        session
+            .expect_any_of(&["session.created", "session.updated"])
+            .await?;
+        session
+            .send_text(session_update_body(
+                sample_rate,
+                self.endpointing_ms,
+                &self.language,
+            ))
+            .await?;
+        session.expect_any_of(&["session.updated"]).await?;
+        Ok(session)
+    }
+}
+
+/// One live upstream connection (handshake completed). Owned by the pump in
+/// production; directly driven by the handshake tests until then.
+pub struct RealtimeSttSession {
+    ws: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+}
+
+impl RealtimeSttSession {
+    pub async fn send_text(&mut self, v: serde_json::Value) -> Result<(), HarnessError> {
+        self.ws
+            .send(Message::Text(v.to_string()))
+            .await
+            .map_err(|e| HarnessError::Network(format!("stt realtime send failed: {e}")))
+    }
+
+    pub async fn send_pcm(&mut self, bytes: &[u8]) -> Result<(), HarnessError> {
+        self.ws
+            .send(Message::Binary(bytes.to_vec()))
+            .await
+            .map_err(|e| HarnessError::Network(format!("stt realtime send failed: {e}")))
+    }
+
+    /// Flush buffered audio upstream (`input_audio_buffer.commit`).
+    pub async fn commit(&mut self) -> Result<(), HarnessError> {
+        self.send_text(serde_json::json!({"type": "input_audio_buffer.commit"}))
+            .await
+    }
+
+    /// Discard buffered audio upstream (`input_audio_buffer.clear`).
+    pub async fn clear(&mut self) -> Result<(), HarnessError> {
+        self.send_text(serde_json::json!({"type": "input_audio_buffer.clear"}))
+            .await
+    }
+
+    /// Next server text event, skipping binary frames (pings/pongs are
+    /// answered by tungstenite on read). `None` = upstream closed.
+    pub async fn next_raw(&mut self) -> Option<Result<String, HarnessError>> {
+        loop {
+            match tokio::time::timeout(CONNECT_TIMEOUT, self.ws.next()).await {
+                Ok(Some(Ok(Message::Text(t)))) => return Some(Ok(t)),
+                Ok(Some(Ok(_))) => continue, // Binary/Ping/Pong/Close
+                Ok(Some(Err(e))) => {
+                    return Some(Err(HarnessError::Network(format!(
+                        "stt realtime read failed: {e}"
+                    ))))
+                }
+                Ok(None) | Err(_) => return None, // closed or CONNECT_TIMEOUT elapsed
+            }
+        }
+    }
+
+    /// Read text events (bounded by [`CONNECT_TIMEOUT`]) until one whose
+    /// `type` is in `types` arrives; an `error` event fails immediately with
+    /// its message surfaced (nested `error.message`, flat `message` fallback).
+    async fn expect_any_of(&mut self, types: &[&str]) -> Result<(), HarnessError> {
+        loop {
+            let text = match self.next_raw().await {
+                Some(Ok(t)) => t,
+                Some(Err(e)) => return Err(e),
+                None => {
+                    return Err(HarnessError::Network(
+                        "stt realtime upstream closed during handshake".to_string(),
+                    ))
+                }
+            };
+            let v: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(HarnessError::protocol(format!(
+                        "bad stt handshake event: {e}"
+                    )))
+                }
+            };
+            let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if types.contains(&ty) {
+                return Ok(());
+            }
+            if ty == "error" {
+                return Err(self.upstream_error(&v));
+            }
+            // Other event types (late duplicates, buffer confirmations) are
+            // ignored while waiting.
+        }
+    }
+
+    /// Extract an upstream error message (nested `error.message` — VERIFIED
+    /// from http_server.cpp — flat `message` fallback, then a generic string).
+    fn upstream_error(&self, v: &serde_json::Value) -> HarnessError {
+        let msg = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .or_else(|| v.get("message").and_then(|m| m.as_str()))
+            .unwrap_or("unknown upstream error");
+        HarnessError::upstream("stt-realtime", 0, msg)
+    }
 }
 
 #[cfg(test)]
