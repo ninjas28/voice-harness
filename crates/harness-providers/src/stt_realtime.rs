@@ -110,6 +110,25 @@ pub enum SttRealtimeEvent {
     Cleared,
 }
 
+/// Replace the value after `api_key=` (up to the next `&` or end of string)
+/// with `<redacted>`. Applied to every error string that could embed the
+/// upstream dial URL — the STT realtime API key rides in the WS URL query
+/// string (nemo-speech.cpp compat), so it must never reach logs via an error.
+pub fn redact_api_key_in_url(s: &str) -> String {
+    const KEY: &str = "api_key=";
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find(KEY) {
+        let (before, after) = rest.split_at(pos + KEY.len());
+        out.push_str(before);
+        let value_end = after.find('&').unwrap_or(after.len());
+        out.push_str("<redacted>");
+        rest = &after[value_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Handshake/IO timeout for one upstream round trip (dial, greeting, update
 /// round trip).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -117,11 +136,25 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Client-side half of the upstream realtime STT WebSocket. Cheap to clone
 /// into tests/constructors; state lives in the [`RealtimeSttSession`] a
 /// successful [`RealtimeSttClient::connect`] returns.
-#[derive(Debug, Clone)]
+///
+/// Debug is hand-written: the dial URL carries the API key as a query
+/// parameter (`?api_key=…`), so the derived Debug over `url` would leak it
+/// into any `{client:?}` log line.
+#[derive(Clone)]
 pub struct RealtimeSttClient {
     url: String,
     endpointing_ms: u64,
     language: String,
+}
+
+impl std::fmt::Debug for RealtimeSttClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealtimeSttClient")
+            .field("url", &redact_api_key_in_url(&self.url))
+            .field("endpointing_ms", &self.endpointing_ms)
+            .field("language", &self.language)
+            .finish()
+    }
 }
 
 impl RealtimeSttClient {
@@ -147,7 +180,14 @@ impl RealtimeSttClient {
         let (ws, _resp) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(&self.url))
             .await
             .map_err(|_| HarnessError::Network("stt realtime dial timeout".to_string()))?
-            .map_err(|e| HarnessError::Network(format!("stt realtime dial failed: {e}")))?;
+            .map_err(|e| {
+                // tungstenite embeds the full dial URL (api_key query
+                // parameter included) in its error text — redact it.
+                HarnessError::Network(format!(
+                    "stt realtime dial failed: {}",
+                    redact_api_key_in_url(&e.to_string())
+                ))
+            })?;
         let mut session = RealtimeSttSession { ws };
         // The server speaks first per docs/api.md; the greeting may still
         // race our update, so tolerate either order.
@@ -425,6 +465,78 @@ pub async fn spawn_link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const KEY: &str = "sk-super-secret-key";
+
+    #[test]
+    fn debug_output_never_contains_the_api_key() {
+        let client = RealtimeSttClient::new(
+            "http://127.0.0.1:8080",
+            "/v1/audio/transcriptions/realtime",
+            KEY,
+            700,
+            "en-US",
+        );
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains(KEY), "Debug must not leak the api key: {dbg}");
+        assert!(
+            dbg.contains("<redacted>"),
+            "Debug must show the redaction marker: {dbg}"
+        );
+    }
+
+    #[test]
+    fn redaction_covers_key_up_to_ampersand() {
+        let out = redact_api_key_in_url("ws://h/p?api_key=abc&x=1");
+        assert_eq!(out, "ws://h/p?api_key=<redacted>&x=1");
+    }
+
+    #[test]
+    fn redaction_covers_key_at_end_of_string() {
+        let out = redact_api_key_in_url("ws://h/p?api_key=abc");
+        assert_eq!(out, "ws://h/p?api_key=<redacted>");
+    }
+
+    #[test]
+    fn redaction_leaves_urls_without_api_key_untouched() {
+        let u = "wss://asr.example.com/v1/audio/transcriptions/realtime";
+        assert_eq!(redact_api_key_in_url(u), u);
+        // Unrelated parameter names are not mangled.
+        let u = "ws://h/p?other=abc";
+        assert_eq!(redact_api_key_in_url(u), u);
+    }
+
+    #[test]
+    fn dial_failure_error_text_is_redacted() {
+        // A dead port on loopback: the tungstenite dial error embeds the full
+        // URL — including the api_key query parameter. It must not survive
+        // into the surfaced error text.
+        let client = RealtimeSttClient::new(
+            "http://127.0.0.1:9",
+            "/v1/audio/transcriptions/realtime",
+            KEY,
+            700,
+            "",
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt.block_on(async {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), client.connect(16_000))
+                .await
+                .expect("dial attempt bounded")
+            {
+                Err(e) => e,
+                Ok(_) => panic!("nothing listens on port 9 — dial must fail"),
+            }
+        });
+        let text = err.to_string();
+        assert!(
+            !text.contains(KEY),
+            "error text must not leak the api key: {text}"
+        );
+    }
 
     #[test]
     fn ws_url_converts_scheme_and_appends_path_and_key() {
