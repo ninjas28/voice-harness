@@ -79,13 +79,18 @@ struct PanelView: View {
             TextField("ws://host:8090/v1/realtime", text: $runtime.serverURLString)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(saveURL)
+            Text("API key").font(.caption).foregroundStyle(.secondary)
+            SecureField("empty = no auth", text: $runtime.apiKeyString)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(saveURL)
             if let settingsError {
                 Text(settingsError).font(.caption).foregroundStyle(.red)
             }
             HStack {
                 Button("Save", action: saveURL)
                     .buttonStyle(.borderedProminent)
-                    .disabled(runtime.serverURLString == AppSettings.serverURL.absoluteString)
+                    .disabled(runtime.serverURLString == AppSettings.serverURL.absoluteString
+                              && runtime.apiKeyString == AppSettings.apiKey)
                 Button("Reset") {
                     runtime.serverURLString = AppSettings.defaultServerURLString
                     settingsError = nil
@@ -101,7 +106,7 @@ struct PanelView: View {
     }
 
     private func saveURL() {
-        if let error = runtime.commitServerURL(runtime.serverURLString) {
+        if let error = runtime.commitServerURL(runtime.serverURLString, apiKey: runtime.apiKeyString) {
             settingsError = error
         } else {
             settingsError = nil

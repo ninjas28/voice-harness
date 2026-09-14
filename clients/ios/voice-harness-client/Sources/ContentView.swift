@@ -67,13 +67,17 @@ struct ContentView: View {
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
+                    SecureField("empty = no auth", text: $runtime.apiKeyString)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
                     if let settingsError {
                         Text(settingsError).font(.caption).foregroundStyle(.red)
                     }
                     HStack {
                         Button("Save", action: saveURL)
                             .buttonStyle(.borderedProminent)
-                            .disabled(runtime.serverURLString == AppSettings.serverURL.absoluteString)
+                            .disabled(runtime.serverURLString == AppSettings.serverURL.absoluteString
+                                      && runtime.apiKeyString == AppSettings.apiKey)
                         Button("Reset") {
                             runtime.serverURLString = AppSettings.defaultServerURLString
                             settingsError = nil
@@ -91,7 +95,7 @@ struct ContentView: View {
     }
 
     private func saveURL() {
-        if let error = runtime.commitServerURL(runtime.serverURLString) {
+        if let error = runtime.commitServerURL(runtime.serverURLString, apiKey: runtime.apiKeyString) {
             settingsError = error
         } else {
             settingsError = nil
