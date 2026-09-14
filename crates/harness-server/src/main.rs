@@ -88,6 +88,17 @@ async fn main() {
             eprintln!("failed to bind {}: {e}", config.server.bind);
             std::process::exit(1);
         });
+    // Exposed-but-unauthenticated is the classic footgun: a LAN/WAN bind with
+    // an empty api_keys list accepts audio + LLM turns from anyone who can
+    // reach the port. Say so loudly at startup instead of failing silently.
+    if config.server.api_keys.is_empty() && !is_loopback_bind(&config.server.bind) {
+        tracing::warn!(
+            "server is bound to {} with NO api_keys — the daemon is exposed unauthenticated \
+             (anyone on the network can stream audio and use your LLM/TTS); set [server].api_keys \
+             or bind to a loopback address",
+            config.server.bind
+        );
+    }
     if config.prompts.system_file.trim().is_empty() {
         tracing::info!(
             "system prompt: inline ([prompts.system], {} chars)",
@@ -112,6 +123,26 @@ async fn main() {
     axum::serve(listener, app)
         .await
         .expect("server runs until stopped");
+}
+
+/// True when `bind` (`host:port`, IPv6 in brackets) targets a loopback
+/// address (127.x.x.x, ::1, or the `localhost` name). Used to decide whether
+/// an empty `server.api_keys` config is a "localhost trust" setup or an
+/// exposed unauthenticated daemon.
+fn is_loopback_bind(bind: &str) -> bool {
+    let Some((host, _port)) = bind.rsplit_once(':') else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host == "localhost" {
+        return true;
+    }
+    if host == "::1" {
+        return true;
+    }
+    host.parse::<std::net::Ipv4Addr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 /// `auth` subcommand: run the OAuth flow for one configured MCP server.
@@ -165,5 +196,25 @@ async fn run_auth_command(server_name: &str, config_path: Option<&str>) {
             eprintln!("authorization failed: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback_bind;
+
+    #[test]
+    fn loopback_binds_are_detected() {
+        assert!(is_loopback_bind("127.0.0.1:8090"));
+        assert!(is_loopback_bind("[::1]:8090"));
+        assert!(is_loopback_bind("localhost:8090"));
+        assert!(is_loopback_bind("127.0.0.1:0"));
+    }
+
+    #[test]
+    fn non_loopback_binds_are_detected() {
+        assert!(!is_loopback_bind("0.0.0.0:8090"));
+        assert!(!is_loopback_bind("192.168.10.94:8090"));
+        assert!(!is_loopback_bind("[::]:8090"));
     }
 }
