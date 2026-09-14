@@ -59,8 +59,9 @@ swift build
 
 `config/voice-harness.toml` (see `voice-harness.toml.example`):
 
-- `[server]` — bind address, `api_keys` (clients must present one as a bearer
-  token), `sample_rate` (16 kHz)
+- `[server]` — bind address, `api_keys` (clients must present one via an
+  `Authorization: Bearer` or `X-API-Key` header — auth is header-only;
+  query-string tokens are refused), `sample_rate` (16 kHz)
 - `[stt]` / `[tts]` — voice-server base URL + API key
 - `[stt.realtime]` — optional streaming STT over the ASR server's realtime
   transcription WebSocket (nemo-speech.cpp): `enabled` (default `false` —

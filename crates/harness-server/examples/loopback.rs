@@ -31,7 +31,8 @@ struct Args {
     /// WAV file to stream as a single utterance
     #[arg(long)]
     file: std::path::PathBuf,
-    /// API key (sent as `?token=`; omit when the server requires none)
+    /// API key (sent as an `Authorization: Bearer` header; omit when the
+    /// server requires none)
     #[arg(long)]
     token: Option<String>,
 }
@@ -58,12 +59,18 @@ async fn main() {
         pcm.len() as f64 / f64::from(SAMPLE_RATE),
     );
 
-    // Connect (token in the query string — browsers/WS cannot always set headers).
-    let url = match &args.token {
-        Some(token) => format!("{}?token={}", args.ws, token),
-        None => args.ws.clone(),
-    };
-    let request = url.into_client_request().expect("valid websocket url");
+    // Connect (key in the Authorization header — query strings leak into
+    // proxies/access logs).
+    let mut request = args
+        .ws
+        .clone()
+        .into_client_request()
+        .expect("valid websocket url");
+    if let Some(token) = &args.token {
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    }
     let (mut ws, _resp) = tokio_tungstenite::connect_async(request)
         .await
         .expect("server reachable");

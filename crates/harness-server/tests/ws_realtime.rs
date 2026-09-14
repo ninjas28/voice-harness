@@ -251,14 +251,13 @@ async fn auth_required_when_keys_configured() {
     let result = tokio_tungstenite::connect_async(&url).await;
     assert!(result.is_err(), "missing token is refused");
 
-    // ?token= works.
-    let ws: Ws = tokio_tungstenite::connect_async(format!("{url}?token=secret"))
-        .await
-        .expect("token auth accepted")
-        .0;
-    drop(ws);
+    // A token in the query string is REFUSED: query strings leak into
+    // proxies/access logs, so auth is header-only. (The ?token= fallback
+    // was removed for exactly that reason.)
+    let result = tokio_tungstenite::connect_async(format!("{url}?token=secret")).await;
+    assert!(result.is_err(), "query-string token is refused");
 
-    // Authorization header also works.
+    // Authorization header works.
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut req = url.clone().into_client_request().unwrap();
     req.headers_mut()

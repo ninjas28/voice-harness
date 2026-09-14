@@ -217,9 +217,9 @@ impl IntoResponse for ApiError {
 }
 
 /// Auth middleware: when `server.api_keys` is non-empty, require
-/// `Authorization: Bearer <key>`, `X-API-Key: <key>`, or `?token=<key>` in the
-/// query string (browsers cannot set headers on WebSocket handshakes);
-/// otherwise pass (localhost/LAN trust model). Applies to every route.
+/// `Authorization: Bearer <key>` or `X-API-Key: <key>`; otherwise pass
+/// (localhost/LAN trust model). Auth is header-only: query-string tokens
+/// leak into proxies/access logs. Applies to every route.
 async fn require_api_key(
     State(config): State<Arc<Config>>,
     headers: HeaderMap,
@@ -239,20 +239,11 @@ async fn require_api_key(
                 .get("x-api-key")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned)
-        })
-        .or_else(|| query_token(req.uri().query()));
+        });
     match provided {
         Some(key) if config.server.api_keys.contains(&key) => Ok(next.run(req).await),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
-}
-
-/// Extract `token=<value>` from a raw query string (first occurrence wins).
-fn query_token(query: Option<&str>) -> Option<String> {
-    query?.split('&').find_map(|pair| {
-        pair.strip_prefix("token=")
-            .map(|v| v.split('&').next().unwrap_or("").to_string())
-    })
 }
 
 /// The request URI as logged by [`RedactedMakeSpan`]: PATH ONLY. Query strings
@@ -269,7 +260,9 @@ fn redacted_uri(uri: &axum::http::Uri) -> String {
 }
 
 /// [`tower_http::trace::MakeSpan`] that records method, URI PATH, and version —
-/// never the full URI (the query string holds the `token=` API key).
+/// never the full URI. Query strings are dropped as defense-in-depth (they
+/// historically carried the `token=` API key and may carry sensitive values
+/// again); an empty request target normalizes to `/`.
 #[derive(Debug, Clone, Default)]
 struct RedactedMakeSpan;
 
@@ -294,9 +287,9 @@ pub fn build_router(deps: RouterDeps) -> Router {
     // The two routes use different state types (RouterDeps vs WsState), so
     // each sub-router is built with its own state and merged; the auth + trace
     // layers wrap the merged result and apply to both. The trace span records
-    // the request URI PATH ONLY — query strings carry `?token=<api key>` on
-    // WS handshakes (browsers cannot set headers there) and must never reach
-    // logs.
+    // the request URI PATH ONLY — query strings are dropped as
+    // defense-in-depth (they historically carried the `token=` API key and
+    // must never reach logs).
     let api = Router::new()
         .route("/v1/turn", post(turn_handler))
         .route("/healthz", get(|| async { "ok" }))
