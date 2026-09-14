@@ -64,6 +64,15 @@ impl WsState {
     }
 }
 
+/// WebSocket upgrade limits: a legitimate 20 ms PCM16 @ 16 kHz audio chunk is
+/// ~640 raw bytes (~1.3 KB base64) and control frames are tiny JSON, so 1 MiB
+/// per message / 256 KiB per frame is far above anything a real client sends
+/// while capping the damage a malicious peer can cause (memory exhaustion via
+/// huge frames). tungstenite enforces these on read and fails the connection
+/// when exceeded.
+const WS_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+const WS_MAX_FRAME_SIZE: usize = 256 * 1024;
+
 /// `GET /v1/realtime` handler: validate the `Origin` header (cross-site
 /// WebSocket hijacking guard), then upgrade and serve the connection loop.
 ///
@@ -84,7 +93,10 @@ pub async fn realtime_handler(
             return (axum::http::StatusCode::FORBIDDEN, "origin not allowed").into_response();
         }
     }
-    upgrade.on_upgrade(move |socket| handle_socket(socket, ws))
+    upgrade
+        .max_message_size(WS_MAX_MESSAGE_SIZE)
+        .max_frame_size(WS_MAX_FRAME_SIZE)
+        .on_upgrade(move |socket| handle_socket(socket, ws))
 }
 
 /// Serve one upgraded WebSocket connection until it closes or idles out.
