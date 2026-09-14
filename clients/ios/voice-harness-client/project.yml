@@ -28,7 +28,7 @@ targets:
         UIBackgroundModes: [audio]
         NSMicrophoneUsageDescription: "Voice Harness streams your microphone to your own voice assistant server."
         NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
   VoiceHarnessAppTests:
     type: bundle.unit-test
     platform: iOS
