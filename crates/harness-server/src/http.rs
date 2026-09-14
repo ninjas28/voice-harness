@@ -40,6 +40,10 @@ pub struct RouterDeps {
     pub llm: Arc<dyn harness_providers::llm::LlmProvider>,
     pub tts: Arc<dyn harness_providers::tts::TtsProvider>,
     pub stt: Arc<dyn harness_providers::stt::SttProvider>,
+    /// Streaming STT client for the ASR server's realtime transcription WS.
+    /// `None` = batch mode (harness-side VAD + WAV upload) — the default and
+    /// the loopback example path.
+    pub stt_realtime: Option<Arc<harness_providers::stt_realtime::RealtimeSttClient>>,
     pub plugins: Arc<harness_plugins::PluginRegistry>,
     /// Conversation memory keyed by session id; HTTP turns with a `device_id`
     /// reuse that session so context survives across requests.

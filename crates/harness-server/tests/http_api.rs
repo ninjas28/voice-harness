@@ -189,6 +189,7 @@ fn deps_for(llm: &MockServer, tts: &MockServer, stt: &MockServer) -> RouterDeps 
         llm: Arc::new(MockLlm { url: llm.uri() }),
         tts: Arc::new(MockTts { url: tts.uri() }),
         stt: Arc::new(MockStt { url: stt.uri() }),
+        stt_realtime: None,
         plugins: Arc::new(PluginRegistry::new()),
         sessions: Arc::new(SessionStore::new()),
     }
@@ -284,6 +285,7 @@ async fn wrong_api_key_is_401() {
         llm: Arc::new(MockLlm { url: llm.uri() }),
         tts: Arc::new(MockTts { url: tts.uri() }),
         stt: Arc::new(MockStt { url: stt.uri() }),
+        stt_realtime: None,
         plugins: Arc::new(PluginRegistry::new()),
         sessions: Arc::new(SessionStore::new()),
     };
@@ -372,6 +374,7 @@ async fn missing_api_key_when_required_is_401() {
         llm: Arc::new(MockLlm { url: llm.uri() }),
         tts: Arc::new(MockTts { url: tts.uri() }),
         stt: Arc::new(MockStt { url: stt.uri() }),
+        stt_realtime: None,
         plugins: Arc::new(PluginRegistry::new()),
         sessions: Arc::new(SessionStore::new()),
     };
@@ -408,6 +411,7 @@ async fn wav_turn_with_no_speech_still_completes() {
         stt: Arc::new(MockStt {
             url: empty_stt.uri(),
         }),
+        stt_realtime: None,
         plugins: Arc::new(PluginRegistry::new()),
         sessions: Arc::new(SessionStore::new()),
     };

@@ -208,6 +208,7 @@ async fn spawn_server(
         stt: Arc::new(ScriptedStt {
             queue: Mutex::new(queue),
         }),
+        stt_realtime: None,
         plugins: Arc::new(PluginRegistry::new()),
         sessions: Arc::new(SessionStore::new()),
     };

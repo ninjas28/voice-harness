@@ -37,6 +37,9 @@ pub struct WsState {
     pub config: harness_core::config::Config,
     pub deps_factory: DepsFactory,
     pub sessions: Arc<SessionStore>,
+    /// Streaming STT client for the ASR server's realtime transcription WS.
+    /// `None` = batch mode (harness-side VAD + WAV upload).
+    pub stt_realtime: Option<Arc<harness_providers::stt_realtime::RealtimeSttClient>>,
 }
 
 impl WsState {
@@ -45,6 +48,7 @@ impl WsState {
         Self {
             config: deps.config.clone(),
             sessions: deps.sessions.clone(),
+            stt_realtime: deps.stt_realtime.clone(),
             deps_factory: Arc::new({
                 let deps = deps.clone();
                 move || Deps {

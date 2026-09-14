@@ -8,6 +8,7 @@ use harness_core::config::Config;
 use harness_plugins::registry_from_config;
 use harness_providers::llm::OpenAiLlmClient;
 use harness_providers::stt::OpenAiSttClient;
+use harness_providers::stt_realtime::RealtimeSttClient;
 use harness_providers::tts::OpenAiTtsClient;
 use harness_server::http::{build_router, RouterDeps};
 use harness_server::state::SessionStore;
@@ -52,6 +53,17 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Streaming STT is opt-in ([stt.realtime].enabled); batch stays the
+    // fallback and the loopback example path.
+    let stt_realtime = config.stt.realtime.enabled.then(|| {
+        Arc::new(RealtimeSttClient::new(
+            &config.stt.base_url,
+            &config.stt.realtime.path,
+            &config.stt.api_key,
+            config.stt.realtime.endpointing_ms,
+            &config.stt.realtime.language,
+        ))
+    });
     let deps = RouterDeps {
         sessions: Arc::new(SessionStore::new()),
         llm: Arc::new(OpenAiLlmClient::new(
@@ -61,6 +73,7 @@ async fn main() {
         )),
         tts: Arc::new(OpenAiTtsClient::from_config(&config.tts)),
         stt: Arc::new(OpenAiSttClient::from_config(&config.stt)),
+        stt_realtime,
         plugins: Arc::new(registry_from_config(&config.plugins)),
         config: config.clone(),
     };
@@ -87,6 +100,14 @@ async fn main() {
             config.prompts.system.len()
         );
     }
+    tracing::info!(
+        "stt: {}",
+        if config.stt.realtime.enabled {
+            format!("realtime ({})", config.stt.realtime.path)
+        } else {
+            "batch".to_string()
+        }
+    );
     tracing::info!("voice-harness listening on http://{}", config.server.bind);
     axum::serve(listener, app)
         .await
