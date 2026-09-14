@@ -5,6 +5,10 @@
 [server]
 bind = "127.0.0.1:8090"
 api_keys = []                      # empty = require none (localhost/LAN trust)
+# Browser origins allowed on the /v1/realtime WebSocket (cross-site WebSocket
+# hijacking guard). Native clients send no Origin header and are always
+# allowed; an empty list rejects EVERY browser origin. Exact-match entries:
+# allowed_origins = ["https://home.example.com"]
 
 [stt]
 base_url = "http://127.0.0.1:8000"

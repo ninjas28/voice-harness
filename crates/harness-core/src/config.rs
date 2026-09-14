@@ -26,6 +26,13 @@ pub struct ServerConfig {
     pub bind: String,
     #[serde(default)]
     pub api_keys: Vec<String>,
+    /// Browser origins allowed to open the `/v1/realtime` WebSocket. Native
+    /// clients send no `Origin` header and are always allowed; a browser
+    /// request's Origin must exactly match one of these entries. Empty = all
+    /// Origin-bearing (browser) requests are rejected (cross-site WebSocket
+    /// hijacking guard); native clients are unaffected.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 fn default_bind() -> String {
@@ -329,6 +336,7 @@ impl Default for Config {
             server: ServerConfig {
                 bind: default_bind(),
                 api_keys: Vec::new(),
+                allowed_origins: Vec::new(),
             },
             stt: SttConfig {
                 base_url: default_stt_base_url(),
@@ -673,6 +681,31 @@ system_file = "prompt.md"
         assert_eq!(
             cfg.prompts.system, "SPEAK PLAIN.\nBe brief always.",
             "system_file content wins over inline system; trailing newline trimmed"
+        );
+    }
+
+    #[test]
+    fn allowed_origins_defaults_empty_and_parses_from_toml() {
+        let defaults = Config::load(None).expect("defaults load");
+        assert!(
+            defaults.server.allowed_origins.is_empty(),
+            "empty allowlist by default: all browser origins rejected"
+        );
+
+        let path = std::env::temp_dir().join(format!("vh-origins-cfg-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"
+[server]
+bind = "127.0.0.1:8090"
+allowed_origins = ["https://home.example.com"]
+"#,
+        )
+        .expect("write temp config");
+        let cfg = Config::load(Some(&path)).expect("parses");
+        assert_eq!(
+            cfg.server.allowed_origins,
+            vec!["https://home.example.com".to_string()]
         );
     }
 

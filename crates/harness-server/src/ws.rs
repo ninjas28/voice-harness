@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
 use harness_core::sentence::{ends_sentence, join_transcripts};
@@ -64,8 +64,26 @@ impl WsState {
     }
 }
 
-/// `GET /v1/realtime` handler: upgrade, then serve the connection loop.
-pub async fn realtime_handler(State(ws): State<WsState>, upgrade: WebSocketUpgrade) -> Response {
+/// `GET /v1/realtime` handler: validate the `Origin` header (cross-site
+/// WebSocket hijacking guard), then upgrade and serve the connection loop.
+///
+/// Policy: no `Origin` header (native clients) → allowed. An `Origin` header
+/// (browser contexts) is allowed only when it exactly matches an entry in
+/// `server.allowed_origins`; an empty allowlist rejects every browser origin.
+pub async fn realtime_handler(
+    State(ws): State<WsState>,
+    headers: axum::http::HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    if let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        if !ws.config.server.allowed_origins.iter().any(|o| o == origin) {
+            tracing::warn!(origin, "websocket upgrade rejected: origin not allowed");
+            return (axum::http::StatusCode::FORBIDDEN, "origin not allowed").into_response();
+        }
+    }
     upgrade.on_upgrade(move |socket| handle_socket(socket, ws))
 }
 
