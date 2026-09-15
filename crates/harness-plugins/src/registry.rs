@@ -119,7 +119,8 @@ pub fn registry_from_config(cfg: &PluginsConfig) -> PluginRegistry {
                     .with_endpoints(
                         cfg.weather.api_base.clone(),
                         cfg.weather.geocoding_base.clone(),
-                    ),
+                    )
+                    .with_default_units(&cfg.weather.units),
             )),
             "mcp" => {
                 if cfg.mcp.servers.is_empty() {

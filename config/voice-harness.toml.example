@@ -79,6 +79,7 @@ enabled = ["time", "web_search", "weather"]
 # default_location = "Portland, Oregon"   # used when the user asks for weather without naming a place
 # api_base = ""                            # full forecast endpoint URL override
 # geocoding_base = ""                      # full geocoding endpoint URL override
+# units = "imperial"                       # default units when the LLM omits them (empty = metric)
 
 # Optional MCP (Model Context Protocol) servers, exposed as tools `mcp.<name>.<tool>`.
 # OAuth tokens are persisted to token_store (chmod 600, never commit it). Authorize

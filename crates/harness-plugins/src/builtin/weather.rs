@@ -22,6 +22,8 @@ pub struct WeatherPlugin {
     geocoding_base: String,
     /// Location used when the LLM omits one.
     default_location: String,
+    /// Unit system when the LLM omits `units` (None = metric).
+    default_units: Option<Units>,
 }
 
 impl WeatherPlugin {
@@ -30,6 +32,7 @@ impl WeatherPlugin {
             api_base: String::new(),
             geocoding_base: String::new(),
             default_location,
+            default_units: None,
         }
     }
 
@@ -38,6 +41,13 @@ impl WeatherPlugin {
     pub fn with_endpoints(mut self, api_base: String, geocoding_base: String) -> Self {
         self.api_base = api_base;
         self.geocoding_base = geocoding_base;
+        self
+    }
+
+    /// Default unit system from `[plugins.weather].units`
+    /// ("" or anything unrecognized = metric).
+    pub fn with_default_units(mut self, units: &str) -> Self {
+        self.default_units = Some(units_from(units));
         self
     }
 
@@ -290,8 +300,13 @@ fn units_from(arg: &str) -> Units {
     }
 }
 
-fn units_from_none(arg: Option<&str>) -> Units {
-    arg.map(units_from).unwrap_or(Units::Metric)
+/// Units for a call: an explicit `units` argument always wins; otherwise the
+/// configured default; otherwise metric.
+fn units_for(arg: Option<&str>, configured: Option<Units>) -> Units {
+    match arg {
+        Some(a) => units_from(a),
+        None => configured.unwrap_or(Units::Metric),
+    }
 }
 
 /// Forecast days including today, clamped to the API's 1..=7 range.
@@ -357,7 +372,7 @@ impl Plugin for WeatherPlugin {
                     "properties": {
                         "location": { "type": "string", "description": "Place name, e.g. \"Paris\" or \"Austin, Texas\"" },
                         "days": { "type": "integer", "description": "Forecast days including today (1-7, default 1)" },
-                        "units": { "type": "string", "enum": ["metric", "imperial"], "description": "Unit system (default metric)" }
+                        "units": { "type": "string", "enum": ["metric", "imperial"], "description": "Unit system; omit for the configured default" }
                     },
                     "required": []
                 }
@@ -389,7 +404,10 @@ impl Plugin for WeatherPlugin {
                 .to_string());
         };
         let days = clamp_days(arguments.get("days").and_then(Value::as_u64));
-        let units = units_from_none(arguments.get("units").and_then(Value::as_str));
+        let units = units_for(
+            arguments.get("units").and_then(Value::as_str),
+            self.default_units,
+        );
 
         let geo = self.geocode(&location).await?;
         self.fetch_forecast(&geo, days, units).await
@@ -419,11 +437,78 @@ mod tests {
         assert_eq!(units_from("imperial"), Units::Imperial);
         assert_eq!(units_from("metric"), Units::Metric);
         assert_eq!(units_from("bogus"), Units::Metric);
-        assert_eq!(units_from_none(None), Units::Metric);
         assert_eq!(clamp_days(None), 1);
         assert_eq!(clamp_days(Some(3)), 3);
         assert_eq!(clamp_days(Some(0)), 1);
         assert_eq!(clamp_days(Some(99)), 7);
+    }
+
+    #[test]
+    fn units_resolution_argument_wins_over_configured_default() {
+        // No argument, no configured default → metric.
+        assert_eq!(units_for(None, None), Units::Metric);
+        // No argument, configured default → the default.
+        assert_eq!(units_for(None, Some(Units::Imperial)), Units::Imperial);
+        // Explicit argument wins over the configured default.
+        assert_eq!(
+            units_for(Some("metric"), Some(Units::Imperial)),
+            Units::Metric
+        );
+        assert_eq!(
+            units_for(Some("imperial"), Some(Units::Metric)),
+            Units::Imperial
+        );
+        // Unrecognized argument falls back to metric, even with a configured
+        // imperial default (same tolerance as `units_from`).
+        assert_eq!(
+            units_for(Some("bogus"), Some(Units::Imperial)),
+            Units::Metric
+        );
+    }
+
+    #[tokio::test]
+    async fn call_uses_configured_default_units_when_argument_omitted() {
+        let (geo, api) = setup_mock_pair().await;
+        let p = WeatherPlugin::new(String::new())
+            .with_endpoints(api.uri(), geo.uri())
+            .with_default_units("imperial");
+        let out = p
+            .call("get_forecast", json!({ "location": "Paris" }))
+            .await
+            .expect("ok");
+        assert_eq!(out["units"]["temperature"], "degrees Fahrenheit");
+        let requests = api.received_requests().await.expect("requests");
+        let url = requests[0].url.to_string();
+        assert!(url.contains("temperature_unit=fahrenheit"), "{url}");
+    }
+
+    #[tokio::test]
+    async fn call_argument_units_override_configured_default() {
+        let (geo, api) = setup_mock_pair().await;
+        let p = WeatherPlugin::new(String::new())
+            .with_endpoints(api.uri(), geo.uri())
+            .with_default_units("imperial");
+        let out = p
+            .call(
+                "get_forecast",
+                json!({ "location": "Paris", "units": "metric" }),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(out["units"]["temperature"], "degrees Celsius");
+    }
+
+    #[tokio::test]
+    async fn call_empty_configured_units_defaults_to_metric() {
+        let (geo, api) = setup_mock_pair().await;
+        let p = WeatherPlugin::new(String::new())
+            .with_endpoints(api.uri(), geo.uri())
+            .with_default_units("");
+        let out = p
+            .call("get_forecast", json!({ "location": "Paris" }))
+            .await
+            .expect("ok");
+        assert_eq!(out["units"]["temperature"], "degrees Celsius");
     }
 
     const GEOCODE_HIT: &str = r#"{

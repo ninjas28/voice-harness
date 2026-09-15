@@ -232,6 +232,7 @@ async fn weather_round_trip_through_registry_with_test_endpoints() {
             default_location: String::new(),
             api_base: api.uri(),
             geocoding_base: geo.uri(),
+            units: String::new(),
         },
         mcp: McpConfig::default(),
     };

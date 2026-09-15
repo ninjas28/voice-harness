@@ -279,6 +279,10 @@ pub struct WeatherConfig {
     /// `https://geocoding-api.open-meteo.com/v1/search`.
     #[serde(default)]
     pub geocoding_base: String,
+    /// Default unit system when the LLM omits `units`: empty = metric,
+    /// `imperial` = Fahrenheit/mph/inches. Explicit tool arguments override.
+    #[serde(default)]
+    pub units: String,
 }
 
 /// MCP (Model Context Protocol) servers exposed as tools over Streamable HTTP.
@@ -525,6 +529,10 @@ scopes = ["home.read"]
         assert!(defaults.plugins.weather.api_base.is_empty());
         assert!(defaults.plugins.weather.geocoding_base.is_empty());
         assert!(
+            defaults.plugins.weather.units.is_empty(),
+            "default units empty = metric"
+        );
+        assert!(
             defaults.plugins.enabled.contains(&"weather".to_string()),
             "weather ships enabled by default: {:?}",
             defaults.plugins.enabled
@@ -541,6 +549,7 @@ enabled = ["time", "weather"]
 default_location = "Portland, Oregon"
 api_base = "http://127.0.0.1:8080/v1/forecast"
 geocoding_base = "http://127.0.0.1:8080/v1/search"
+units = "imperial"
 "#,
         )
         .expect("write temp config");
@@ -554,6 +563,7 @@ geocoding_base = "http://127.0.0.1:8080/v1/search"
             cfg.plugins.weather.geocoding_base,
             "http://127.0.0.1:8080/v1/search"
         );
+        assert_eq!(cfg.plugins.weather.units, "imperial");
     }
 
     #[test]
