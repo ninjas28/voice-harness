@@ -16,10 +16,10 @@ use harness_providers::tts::TtsProvider;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
-/// Maximum LLM round trips in one turn (initial + up to 4 tool rounds). The
-/// extra round gives multi-step agents (e.g. Home Assistant area discovery via
-/// GetLiveContext) room to recover from a bad tool call and still answer.
-const MAX_TOOL_ROUNDS: usize = 5;
+/// Maximum LLM round trips in one turn (initial + up to 7 tool rounds). The
+/// headroom lets multi-step agents (e.g. Home Assistant discovery via
+/// ha_search) recover from bad calls and still answer.
+const MAX_TOOL_ROUNDS: usize = 8;
 
 /// Injected provider set driving a turn. Trait objects throughout so tests can
 /// drive mocks (and `main.rs` wires the real clients).
