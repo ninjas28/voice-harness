@@ -396,7 +396,7 @@ impl Plugin for EchoPluginShared {
 }
 
 #[tokio::test]
-async fn tool_loop_is_capped_at_three_rounds() {
+async fn tool_loop_is_capped_at_four_rounds() {
     // LLM always demands a tool call: the loop must stop after the cap.
     let llm = Arc::new(MockLlm::new(vec![vec![
         LlmEvent::ToolCall {
@@ -420,7 +420,7 @@ async fn tool_loop_is_capped_at_three_rounds() {
         .await
         .unwrap();
 
-    assert_eq!(llm.requests().len(), 4, "initial + 3 tool rounds max");
+    assert_eq!(llm.requests().len(), 5, "initial + 4 tool rounds max");
 }
 
 #[tokio::test]
