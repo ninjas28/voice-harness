@@ -328,6 +328,11 @@ pub struct McpServerConfig {
     /// client registration.
     #[serde(default)]
     pub client_id: String,
+    /// When non-empty, only these upstream tool names surface to the LLM and
+    /// are dispatchable; everything else the server advertises is pruned.
+    /// Empty = every advertised tool passes through.
+    #[serde(default)]
+    pub tool_allowlist: Vec<String>,
 }
 
 fn default_enabled_plugins() -> Vec<String> {

@@ -244,6 +244,64 @@ async fn oauth_server_without_token_is_skipped_with_warning() {
 }
 
 #[tokio::test]
+async fn tool_allowlist_prunes_unlisted_tools() {
+    let server = wiremock::MockServer::start().await;
+    mount_mcp_surface(
+        &server,
+        "sess-allow",
+        json!([
+            { "name": "keep_me", "inputSchema": { "type": "object", "properties": {} } },
+            { "name": "drop_me", "inputSchema": { "type": "object", "properties": {} } }
+        ]),
+        None,
+    )
+    .await;
+
+    let dir = std::env::temp_dir().join(format!("vh-mcp-allow-{}", std::process::id()));
+    let token_path = dir.join("tokens.json");
+    let cfg = PluginsConfig {
+        enabled: vec!["mcp".to_string()],
+        web_search: WebSearchConfig::default(),
+        mcp: McpConfig {
+            token_store: token_path.to_string_lossy().into_owned(),
+            servers: vec![McpServerConfig {
+                name: "allow".into(),
+                url: server.uri(),
+                auth: "bearer".into(),
+                tool_allowlist: vec!["keep_me".into()],
+                ..Default::default()
+            }],
+        },
+        ..Default::default()
+    };
+    let registry = registry_from_config(&cfg);
+    registry.warm_all().await;
+
+    let names = spec_names(&registry);
+    assert!(
+        names.contains(&"mcp.allow.keep_me".to_string()),
+        "allowlisted tool must surface: {names:?}"
+    );
+    assert!(
+        !names.contains(&"mcp.allow.drop_me".to_string()),
+        "unlisted tool must be pruned: {names:?}"
+    );
+
+    // The pruned tool is not dispatchable either (recoverable error for the LLM).
+    let err = registry
+        .dispatch("mcp.allow.drop_me", json!({}))
+        .await
+        .expect_err("pruned tool must not dispatch");
+    assert!(err.contains("drop_me"), "{err}");
+
+    let out = registry
+        .dispatch("mcp.allow.keep_me", json!({}))
+        .await
+        .expect("allowlisted tool dispatches");
+    assert_eq!(out["text"], "pong");
+}
+
+#[tokio::test]
 async fn is_error_tool_result_maps_to_err() {
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(method("POST"))

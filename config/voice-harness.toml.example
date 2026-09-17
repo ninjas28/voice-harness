@@ -96,3 +96,9 @@ enabled = ["time", "web_search", "weather"]
 # url = "https://mcp.example.org/mcp"
 # auth = "oauth"
 # scopes = ["home.read"]
+# tool_allowlist = ["ha_search", "ha_get_state", "ha_bulk_control", "ha_call_service"]
+#   ^ Optional: when non-empty, ONLY these upstream tools surface to the LLM and
+#   are dispatchable; everything else the server advertises is pruned. Useful
+#   for large servers (ha-mcp advertises 77) where the full tool-spec list would
+#   bloat every LLM request, and for keeping config-editing tools (restart,
+#   backups, dashboard edits) out of a voice assistant's reach.

@@ -11,6 +11,7 @@ use harness_core::config::McpServerConfig;
 
 use super::client::McpHttpClient;
 use super::oauth::{probe_and_discover, refresh_token, StoredToken, TokenResponse, TokenStore};
+use super::types::McpTool;
 use crate::{Plugin, PluginManifest};
 
 /// Per-request HTTP timeout for MCP calls.
@@ -37,6 +38,18 @@ pub struct McpPlugin {
     servers: Vec<McpServerConfig>,
     token_store_path: String,
     state: RwLock<State>,
+}
+
+/// Names of the upstream tools one server may surface, honoring its
+/// `tool_allowlist`. Empty allowlist = every tool passes through.
+fn allowlisted_tools<'a>(server: &'a McpServerConfig, tools: &'a [McpTool]) -> Vec<&'a McpTool> {
+    if server.tool_allowlist.is_empty() {
+        return tools.iter().collect();
+    }
+    tools
+        .iter()
+        .filter(|t| server.tool_allowlist.iter().any(|a| a == &t.name))
+        .collect()
 }
 
 impl McpPlugin {
@@ -184,6 +197,7 @@ impl McpPlugin {
 
         client.initialize(bearer.as_deref()).await?;
         let tools = client.list_tools(bearer.as_deref()).await?;
+        let tools = allowlisted_tools(server, &tools);
         let specs: Vec<Value> = tools
             .iter()
             .map(|t| {
@@ -276,6 +290,14 @@ impl Plugin for McpPlugin {
                     .collect::<Vec<_>>()
             )
         })?;
+        // Dispatch-time allowlist check: pruning at warm-up keeps the tool off
+        // the LLM's spec list, but the model can still hallucinate a call to a
+        // pruned name — refuse it instead of forwarding to the server.
+        if !server.tool_allowlist.is_empty() && !server.tool_allowlist.iter().any(|a| a == tool) {
+            return Err(format!(
+                "tool '{tool}' is not allowlisted on mcp server '{server_name}'"
+            ));
+        }
 
         let bearer = self.bearer_for(server).await?;
         let result = {
