@@ -92,7 +92,18 @@ pub struct OpenAiLlmClient {
     base_url: String,
     chat_path: String,
     api_key: String,
+    /// Per-read idle timeout for the streamed SSE body: every poll of the
+    /// upstream stream must produce data within this bound or the turn
+    /// errors. A stalled stream (upstream stops sending but never closes)
+    /// used to hang the turn task forever — no read timeout — so the
+    /// end-of-turn `turn.completed` burst never went out (clients stuck in
+    /// `speaking`; see the stalled-turn lesson in AGENTS.md). No *total*
+    /// request timeout: a long but actively-streaming answer is legitimate.
+    read_timeout: Option<std::time::Duration>,
 }
+
+/// Default per-read bound on the streamed SSE body.
+const DEFAULT_STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One in-progress tool call being accumulated from streamed fragments.
 #[derive(Debug, Default, Clone)]
@@ -387,14 +398,30 @@ impl OpenAiLlmClient {
         chat_path: impl Into<String>,
         api_key: impl Into<String>,
     ) -> Self {
+        Self::with_read_timeout(base_url, chat_path, api_key, DEFAULT_STREAM_READ_TIMEOUT)
+    }
+
+    /// Like [`Self::new`] with an explicit per-read timeout for the streamed
+    /// SSE body (`None` disables it) — the test seam for the stalled-stream
+    /// regression (tests set a short knob instead of sleeping past the
+    /// production default).
+    pub fn with_read_timeout(
+        base_url: impl Into<String>,
+        chat_path: impl Into<String>,
+        api_key: impl Into<String>,
+        read_timeout: impl Into<Option<std::time::Duration>>,
+    ) -> Self {
         Self {
             http: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
+                // No request-level timeout: it would cap the total stream
+                // duration and kill legitimately long streamed answers.
                 .build()
                 .expect("reqwest client builds"),
             base_url: base_url.into(),
             chat_path: chat_path.into(),
             api_key: api_key.into(),
+            read_timeout: read_timeout.into(),
         }
     }
 
@@ -462,7 +489,10 @@ impl LlmProvider for OpenAiLlmClient {
         // the accumulated tool calls + `Done` at stream end. Implemented as
         // an explicit state-machine unfold (no locks): the queue buffers the
         // events each payload maps to, and the mapper carries tool-call
-        // accumulator state across payloads.
+        // accumulator state across payloads. Every read is wrapped in the
+        // per-read timeout so a stalled upstream errors the turn instead of
+        // hanging it.
+        let read_timeout = self.read_timeout;
         let stream = futures::stream::unfold(
             (
                 ChunkMapper::default(),
@@ -471,30 +501,53 @@ impl LlmProvider for OpenAiLlmClient {
                     peeked,
                     resp.bytes_stream(),
                 ))) as Option<DataStream>,
+                read_timeout,
             ),
-            |(mut mapper, mut queue, mut data)| async move {
+            |(mut mapper, mut queue, mut data, read_timeout)| async move {
                 loop {
                     if let Some(ev) = (!queue.is_empty()).then(|| queue.remove(0)) {
-                        return Some((Ok(ev), (mapper, queue, data)));
+                        return Some((Ok(ev), (mapper, queue, data, read_timeout)));
                     }
                     let Some(mut stream) = data.take() else {
                         return None; // fully drained after end-of-stream flush
                     };
-                    match stream.as_mut().next().await {
-                        Some(Ok(d)) => match mapper.apply(&d) {
+                    let next = if let Some(t) = read_timeout {
+                        tokio::time::timeout(t, stream.as_mut().next()).await
+                    } else {
+                        Ok(stream.as_mut().next().await)
+                    };
+                    match next {
+                        Ok(Some(Ok(d))) => match mapper.apply(&d) {
                             Ok(events) => {
                                 data = Some(stream);
                                 queue = events;
                             }
-                            Err(e) => return Some((Err(e), (mapper, queue, data))),
+                            Err(e) => return Some((Err(e), (mapper, queue, data, read_timeout))),
                         },
-                        Some(Err(e)) => return Some((Err(e), (mapper, queue, data))),
-                        None => {
+                        Ok(Some(Err(e))) => {
+                            return Some((Err(e), (mapper, queue, data, read_timeout)))
+                        }
+                        Ok(None) => {
                             // Byte stream ended: flush accumulated tool calls
                             // + Done, and drop the exhausted stream so the
                             // next poll terminates instead of looping.
                             let mut events = mapper.finish();
-                            return Some((Ok(events.remove(0)), (mapper, events, None)));
+                            return Some((
+                                Ok(events.remove(0)),
+                                (mapper, events, None, read_timeout),
+                            ));
+                        }
+                        Err(_elapsed) => {
+                            // The upstream went silent mid-stream: abort the
+                            // turn with an error rather than hanging it (the
+                            // stalled-turn failure mode). The partially-read
+                            // event is discarded; the connection is torn down
+                            // when the stream drops.
+                            let err = HarnessError::Network(format!(
+                                "llm stream stalled: no data within {}s",
+                                read_timeout.map_or(0, |t| t.as_secs())
+                            ));
+                            return Some((Err(err), (mapper, queue, data, read_timeout)));
                         }
                     }
                 }

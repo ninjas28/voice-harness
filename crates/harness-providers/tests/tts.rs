@@ -144,6 +144,59 @@ async fn upstream_error_maps_to_harness_error() {
     assert!(msg.contains("500"), "unexpected: {msg}");
 }
 
+/// Regression: a hung upstream (connection up, body never arrives) used to
+/// hang `synthesize` forever — the reqwest client only set `connect_timeout`,
+/// so a stalled TTS body read froze the turn task, the end-of-turn
+/// `turn.completed` burst never went out, and clients stuck in `speaking`
+/// (see the `completionWatchdog` lesson in AGENTS.md). The client must carry
+/// a request timeout so the turn errors out instead of hanging.
+#[tokio::test]
+async fn hung_tts_body_times_out_instead_of_hanging() {
+    use std::time::Duration;
+
+    let server = wiremock::MockServer::start().await;
+    // 4 s delay: well past the client's request timeout, well inside the
+    // test's own 10 s hard bound.
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "audio/wav")
+                .set_body_raw(wav_bytes(16_000, 1, &[1, 2, 3]), "audio/wav")
+                .set_delay(std::time::Duration::from_secs(4)),
+        )
+        .mount(&server)
+        .await;
+
+    // Short knob: request timeout well inside the mock's 4s delay and the
+    // 10s test bound — the client must error before the (slow but alive)
+    // mock ever answers.
+    let client = OpenAiTtsClient::with_raw_sample_rate_and_timeout(
+        server.uri(),
+        "/v1/audio/speech",
+        "tts-key",
+        "tts-model",
+        "default",
+        "wav",
+        16_000,
+        Duration::from_millis(500),
+    );
+    let started = std::time::Instant::now();
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.synthesize("hello there"),
+    )
+    .await
+    .expect("synthesize returned within the 10s test bound (request timeout must fire first)")
+    .expect_err("hung upstream must error, not hang");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "request timeout must fire before the mock's 4s delay elapsed, took {:?}",
+        started.elapsed()
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("tts"), "unexpected: {msg}");
+}
+
 #[tokio::test]
 async fn from_config_uses_tts_section() {
     let server = wiremock::MockServer::start().await;

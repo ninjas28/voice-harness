@@ -125,3 +125,45 @@ async fn upstream_error_maps_to_harness_error() {
     assert!(msg.contains("stt"), "unexpected: {msg}");
     assert!(msg.contains("401"), "unexpected: {msg}");
 }
+
+/// Regression: a hung upstream (connection up, body never arrives) used to
+/// hang `transcribe` forever — the reqwest client only set `connect_timeout`,
+/// so a stalled STT body read froze the turn task and the end-of-turn burst
+/// never went out (see the stalled-turn lesson in AGENTS.md). The client must
+/// carry a request timeout so the turn errors out instead of hanging.
+#[tokio::test]
+async fn hung_stt_body_times_out_instead_of_hanging() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "text": "late" }))
+                .set_delay(std::time::Duration::from_secs(4)),
+        )
+        .mount(&server)
+        .await;
+
+    // Short knob: request timeout well inside the mock's 4s delay and the
+    // 10s test bound — the client must error before the (slow but alive)
+    // mock ever answers.
+    let client = OpenAiSttClient::new_with_timeout(
+        server.uri(),
+        "/v1/audio/transcriptions",
+        "stt-key",
+        "asr-model",
+        std::time::Duration::from_millis(500),
+    );
+    let pcm = vec![500i16; 100];
+    let started = std::time::Instant::now();
+    let err = tokio::time::timeout(std::time::Duration::from_secs(10), client.transcribe(&pcm))
+        .await
+        .expect("transcribe returned within the 10s test bound (request timeout must fire first)")
+        .expect_err("hung upstream must error, not hang");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "request timeout must fire before the mock's 4s delay elapsed, took {:?}",
+        started.elapsed()
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("stt"), "unexpected: {msg}");
+}

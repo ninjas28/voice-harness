@@ -31,6 +31,13 @@ pub struct OpenAiTtsClient {
     raw_sample_rate: u32,
 }
 
+/// Overall per-request bound: connect (10 s) + status + full body read. A TTS
+/// call that exceeds this is a stalled upstream — the turn must error instead
+/// of hanging. Without a read timeout a hung body read froze the turn task
+/// and the end-of-turn `turn.completed` burst never went out (clients stuck
+/// in `speaking`; see the stalled-turn lesson in AGENTS.md).
+const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// One parsed fmt chunk plus its body length, from the WAV chunk walk.
 type ParsedFmt<'a> = (&'a [u8], usize);
 
@@ -200,9 +207,36 @@ impl OpenAiTtsClient {
         response_format: impl Into<String>,
         raw_sample_rate: u32,
     ) -> Self {
+        Self::with_raw_sample_rate_and_timeout(
+            base_url,
+            speech_path,
+            api_key,
+            model,
+            voice,
+            response_format,
+            raw_sample_rate,
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+    }
+
+    /// Like [`Self::with_raw_sample_rate`] with an explicit request timeout —
+    /// the test seam for the hung-upstream regression (tests set a short knob
+    /// instead of sleeping past the production default).
+    #[allow(clippy::too_many_arguments)] // the existing 7-arg ctor + the timeout knob
+    pub fn with_raw_sample_rate_and_timeout(
+        base_url: impl Into<String>,
+        speech_path: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        voice: impl Into<String>,
+        response_format: impl Into<String>,
+        raw_sample_rate: u32,
+        request_timeout: std::time::Duration,
+    ) -> Self {
         Self {
             http: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(request_timeout)
                 .build()
                 .expect("reqwest client builds"),
             base_url: base_url.into(),

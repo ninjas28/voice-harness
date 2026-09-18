@@ -323,3 +323,75 @@ async fn upstream_error_without_stream_hint_is_not_retried() {
         1
     );
 }
+
+/// Regression: a stalled SSE stream (upstream stops sending mid-answer, but
+/// never closes the connection) used to hang `stream_chat` forever — the
+/// reqwest client only set `connect_timeout`, so the turn task froze and the
+/// end-of-turn `turn.completed` burst never went out; clients stuck in
+/// `speaking` (see the stalled-turn lesson in AGENTS.md). Each read from the
+/// stream must be bounded so a silent upstream errors the turn instead of
+/// hanging it. A total request timeout is deliberately NOT set: a long but
+/// actively-streaming answer is legitimate.
+///
+/// wiremock cannot stall mid-body (its `set_delay` holds the whole response),
+/// so this test scripts a raw TCP server: first SSE chunk immediately, then
+/// silence — the connection stays open, exactly the failure mode.
+#[tokio::test]
+async fn stalled_sse_stream_errors_instead_of_hanging() {
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    // One accepted connection: HTTP/1.1 + chunked SSE. First event at once,
+    // then nothing — the socket stays open (the stalled-upstream condition).
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept");
+        let sse = "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n";
+        let head = "HTTP/1.1 200 OK\r\n\
+                    Content-Type: text/event-stream\r\n\
+                    Transfer-Encoding: chunked\r\n\
+                    \r\n";
+        sock.write_all(head.as_bytes()).await.expect("head");
+        sock.write_all(format!("{:x}\r\n{sse}\r\n", sse.len()).as_bytes())
+            .await
+            .expect("first chunk");
+        sock.flush().await.expect("flush");
+        // Then silence for 30 s: the client's read timeout must fire long
+        // before this task would send anything again or close.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    // Short knob: per-read timeout well inside the 10 s test bound.
+    let client = OpenAiLlmClient::with_read_timeout(
+        format!("http://{addr}"),
+        "/v1/chat/completions",
+        "sk-test",
+        Duration::from_millis(500),
+    );
+
+    let started = std::time::Instant::now();
+    let mut stream = client.stream_chat(chat_req()).await.expect("stream_chat");
+    // First event flows.
+    let first = stream
+        .next()
+        .await
+        .expect("first event must arrive before the stall")
+        .expect("first event ok");
+    assert!(matches!(first, LlmEvent::Delta(_)), "unexpected: {first:?}");
+    // Next read must error on the stalled stream, well inside the bound.
+    let err = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("second read must resolve within the 10s test bound (read timeout must fire)")
+        .expect("stream must not end cleanly on a stall")
+        .expect_err("stalled stream must error, not hang");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "read timeout must fire promptly, took {:?}",
+        started.elapsed()
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("llm"), "unexpected: {msg}");
+    assert!(msg.contains("stalled"), "unexpected: {msg}");
+}

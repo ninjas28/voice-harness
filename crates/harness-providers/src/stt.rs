@@ -69,6 +69,12 @@ fn parse_transcript(body: &str) -> Result<String, HarnessError> {
     Ok(text.to_string())
 }
 
+/// Overall per-request bound for one transcription call: connect (10 s) +
+/// status + full body read. A hung STT body read used to freeze the turn task
+/// (no read timeout) so the end-of-turn burst never went out — see the
+/// stalled-turn lesson in AGENTS.md.
+const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl OpenAiSttClient {
     pub fn new(
         base_url: impl Into<String>,
@@ -76,9 +82,23 @@ impl OpenAiSttClient {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
+        Self::new_with_timeout(base_url, chat_path, api_key, model, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    /// Like [`Self::new`] with an explicit request timeout — the test seam for
+    /// the hung-upstream regression (tests set a short knob instead of
+    /// sleeping past the production default).
+    pub fn new_with_timeout(
+        base_url: impl Into<String>,
+        chat_path: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        request_timeout: std::time::Duration,
+    ) -> Self {
         Self {
             http: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(request_timeout)
                 .build()
                 .expect("reqwest client builds"),
             base_url: base_url.into(),
