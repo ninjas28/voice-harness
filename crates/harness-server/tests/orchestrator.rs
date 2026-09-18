@@ -397,6 +397,74 @@ impl Plugin for EchoPluginShared {
 }
 
 #[tokio::test]
+async fn tool_call_round_emits_thinking_signal() {
+    // Script: call 1 demands one tool call, call 2 answers with text.
+    let llm = Arc::new(MockLlm::new(vec![
+        vec![
+            LlmEvent::ToolCall {
+                id: "c1".into(),
+                name: "time.get_time".into(),
+                arguments: "{}".into(),
+            },
+            LlmEvent::Done {
+                finish_reason: Some("tool_calls".into()),
+            },
+        ],
+        vec![
+            LlmEvent::Delta("10:10.".into()),
+            LlmEvent::Done {
+                finish_reason: None,
+            },
+        ],
+    ]));
+    let mut registry = PluginRegistry::new();
+    registry.register(Box::new(EchoPlugin {
+        calls: Mutex::new(Vec::new()),
+    }));
+    let deps = deps_with(llm, Arc::new(MockTts::new()), registry);
+
+    let (tx, rx) = mpsc::channel(64);
+    let mut session = Session::default();
+    // The ws layer emits State(thinking) before dispatching the turn; seed it
+    // so the asserted ordering matches the production sequence.
+    let _ = tx
+        .send(ServerMsg::State {
+            state: harness_core::types::SessionState::Thinking,
+        })
+        .await;
+    run_text_turn(&deps, &mut session, "what time is it", tx)
+        .await
+        .unwrap();
+    let events = collect_events_all(rx).await;
+
+    // The four turn-level frames appear in order (deltas/audio sit between the
+    // second state.thinking and turn.completed, so filter to the relevant tags).
+    let tags: Vec<&str> = short_names(&events)
+        .into_iter()
+        .filter(|t| matches!(*t, "state" | "state_thinking" | "turn_completed"))
+        .collect();
+    assert_eq!(
+        tags,
+        vec!["state", "state_thinking", "state_thinking", "turn_completed"],
+        "state → state.thinking(calling_tools) → state.thinking(thinking) → turn.completed: {events:?}"
+    );
+    let mut details = Vec::new();
+    for ev in &events {
+        if let ServerMsg::StateThinking { detail } = ev {
+            details.push(*detail);
+        }
+    }
+    assert_eq!(
+        details,
+        vec![
+            harness_core::types::ThinkingDetail::CallingTools,
+            harness_core::types::ThinkingDetail::Thinking
+        ],
+        "calling_tools while dispatching, thinking after it returns"
+    );
+}
+
+#[tokio::test]
 async fn tool_loop_is_capped_at_seven_rounds() {
     // LLM always demands a tool call: the loop must stop after the cap.
     let llm = Arc::new(MockLlm::new(vec![vec![

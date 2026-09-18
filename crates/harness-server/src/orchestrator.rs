@@ -8,7 +8,7 @@ use base64::Engine as _;
 use harness_core::chunker::{strip_for_speech, TextChunker};
 use harness_core::config::Config;
 use harness_core::error::HarnessError;
-use harness_core::types::ServerMsg;
+use harness_core::types::{ServerMsg, ThinkingDetail};
 use harness_plugins::PluginRegistry;
 use harness_providers::llm::{ChatMessage, ChatRequest, LlmEvent, LlmProvider};
 use harness_providers::stt::SttProvider;
@@ -229,12 +229,23 @@ async fn execute_turn(
         }
 
         // Dispatch every tool call; failures become error payloads the LLM can
-        // read and recover from, never an abort.
+        // read and recover from, never an abort. Each dispatch is bracketed by
+        // `state.thinking` frames so clients can show tool activity.
         let mut results: Vec<(String, String)> = Vec::new();
         for (id, name, arguments) in &tool_calls {
+            let _ = events
+                .send(ServerMsg::StateThinking {
+                    detail: ThinkingDetail::CallingTools,
+                })
+                .await;
             let outcome = deps
                 .plugins
                 .dispatch(name, parse_tool_args(arguments))
+                .await;
+            let _ = events
+                .send(ServerMsg::StateThinking {
+                    detail: ThinkingDetail::Thinking,
+                })
                 .await;
             let payload = match outcome {
                 Ok(value) => serde_json::to_string(&value)
