@@ -29,6 +29,17 @@ final class HarnessSessionModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .idle)
     }
 
+    func testStateThinkingDrivesActivity() {
+        let model = HarnessSessionModel()
+        model.apply(.state(.thinking))
+        XCTAssertEqual(model.activity, .thinking)
+        model.apply(.stateThinking(.callingTools))
+        XCTAssertEqual(model.activity, .callingTools)
+        XCTAssertEqual(model.phase, .thinking) // unchanged
+        model.apply(.state(.listening))
+        XCTAssertEqual(model.activity, .idle)
+    }
+
     func testTurnCompletedAfterDrainReturnsToListening() async {
         let model = HarnessSessionModel()
         model.apply(.audioChunk(pcm: "QUJD", seq: 0))

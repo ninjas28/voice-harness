@@ -5,8 +5,14 @@ public enum SessionPhase: String, Codable, Sendable {
     case listening, speech, thinking, speaking
 }
 
+public enum ThinkingDetail: String, Codable, Equatable, Sendable {
+    case thinking
+    case callingTools = "calling_tools"
+}
+
 public enum ServerMessage: Equatable, Sendable {
     case state(SessionPhase)
+    case stateThinking(ThinkingDetail)
     case transcript(String)
     case responseTextDelta(String)
     case responseText(String)
@@ -21,6 +27,7 @@ public enum ServerMessage: Equatable, Sendable {
     struct Wire: Decodable {
         let type: String
         let state: SessionPhase?
+        let detail: ThinkingDetail?
         let text: String?
         let pcm: String?
         let seq: Int?
@@ -29,6 +36,7 @@ public enum ServerMessage: Equatable, Sendable {
         var value: ServerMessage {
             switch type {
             case "state": .state(state ?? .idle)
+            case "state.thinking": .stateThinking(detail ?? .thinking)
             case "transcript": .transcript(text ?? "")
             case "response.text.delta": .responseTextDelta(text ?? "")
             case "response.text": .responseText(text ?? "")

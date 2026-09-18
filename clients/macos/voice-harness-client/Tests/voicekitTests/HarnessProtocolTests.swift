@@ -11,6 +11,8 @@ final class HarnessProtocolTests: XCTestCase {
             (#"{"type":"audio.chunk","pcm":"QUJD","seq":3}"#, .audioChunk(pcm: "QUJD", seq: 3)),
             (#"{"type":"turn.completed"}"#, .turnCompleted),
             (#"{"type":"error","code":"bad","message":"nope"}"#, .error(code: "bad", message: "nope")),
+            (#"{"type":"state.thinking","detail":"calling_tools"}"#, .stateThinking(.callingTools)),
+            (#"{"type":"state.thinking"}"#, .stateThinking(.thinking)), // bare shape: `detail` defaults to plain thinking
         ]
         for (json, expected) in cases {
             XCTAssertEqual(try ServerMessage.decode(json), expected, "failed for \(json)")
