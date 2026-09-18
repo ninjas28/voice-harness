@@ -94,6 +94,16 @@ Server → client: `state` (listening|speech|thinking|speaking), `transcript`,
   client-side playback is pending, the client owns the phase and must absorb
   server `state` messages — including `speech` (the mic hears the client's own
   TTS; there is no AEC). The drain watcher completes the transition.
+- **Stalled turns strand the client in `speaking` forever.** The server sends
+  `turn.completed` → `speaking` → `listening` back-to-back with the final
+  `audio.chunk` (live-verified over the wire), so a healthy stream always
+  completes before drain. But the provider HTTP clients only set
+  `connect_timeout` — no read timeout — so a hung TTS/LLM body read stalls the
+  turn task, the end-of-turn burst never goes out, and the client (which only
+  completes on `turn.completed`) sticks. Client-side guard: after playback
+  drains with no `turn.completed` within ~2.5 s, the session model
+  self-completes the turn (`completionWatchdog`, `HarnessSessionModel`). The
+  real fix is read timeouts on the provider clients.
 - **URLSessionWebSocketTask needs `task.resume()`** after creation, or
   `send()` suspends forever.
 - **`MenuBarExtra(.window)` freezes its window at first-measured height**;
