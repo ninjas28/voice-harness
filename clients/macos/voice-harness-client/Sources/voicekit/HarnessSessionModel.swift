@@ -20,6 +20,16 @@ public final class HarnessSessionModel: ObservableObject {
     /// rules above stay untouched.
     @Published public private(set) var activity: Activity = .idle
 
+    /// How long the completion watchdog waits after playback drains before
+    /// self-completing the turn. The server sends `turn.completed` (+
+    /// trailing states) back-to-back with the final `audio.chunk` — live-
+    /// verified — so a healthy stream always lands it before drain. If it
+    /// never arrives (stalled upstream: the provider HTTP clients have no
+    /// read timeout, a hung TTS/LLM body read stalls the turn task), the UI
+    /// would stick in `speaking` forever. Settable for tests.
+    public var completionWatchdogDelay: Duration = .seconds(2.5)
+    private var completionWatchdog: Task<Void, Never>?
+
     public init() {}
 
     public func apply(_ msg: ServerMessage) {
@@ -46,14 +56,38 @@ public final class HarnessSessionModel: ObservableObject {
             if phase != .speaking { phase = .speaking }
         case .turnCompleted:
             if !audioPending { phase = .listening }
+            completionWatchdog?.cancel()
+            completionWatchdog = nil
         case .error(let _, let m):
             errorMessage = m
             phase = .idle
             activity = .idle
+            completionWatchdog?.cancel()
+            completionWatchdog = nil
         }
     }
 
-    public func audioDidFinish() { audioPending = false }
+    /// Called when playback drains (runtime drain watcher). Arms a watchdog
+    /// that self-completes the turn when the server's end-of-turn burst never
+    /// arrived — a stalled turn leaves the UI in `speaking` forever otherwise.
+    public func audioDidFinish() {
+        audioPending = false
+        guard completionWatchdog == nil else { return }
+        completionWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: self?.completionWatchdogDelay ?? .seconds(2.5))
+            guard let self, !Task.isCancelled else { return }
+            // Clear BEFORE deciding: a new turn's audio may have started while
+            // we slept — this drain's watchdog is spent either way, and the
+            // next drain must be able to arm a fresh one.
+            self.completionWatchdog = nil
+            // Only recover the exact stuck condition: drained, no completion,
+            // still marked speaking. If the user already started talking again
+            // (phase moved to speech/thinking), a fire here would stomp the
+            // new turn's phase back to listening.
+            guard !self.audioPending, self.phase == .speaking else { return }
+            self.apply(.turnCompleted)
+        }
+    }
     public func reset() {
         phase = .idle
         transcript = ""
@@ -61,5 +95,7 @@ public final class HarnessSessionModel: ObservableObject {
         errorMessage = nil
         audioPending = false
         activity = .idle
+        completionWatchdog?.cancel()
+        completionWatchdog = nil
     }
 }
