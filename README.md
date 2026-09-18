@@ -84,6 +84,7 @@ JSON text frames with dotted `type` tags; audio is base64 PCM16, 16 kHz mono.
 | C→S | `speech.end` | optional; server-side VAD also endpointed |
 | C→S | `session.stop` | ends the session |
 | S→C | `state` | `listening` / `speech` / `thinking` / `speaking` |
+| S→C | `state.thinking` | `detail`: `calling_tools` while a tool call is in flight; bare = plain thinking |
 | S→C | `transcript` | STT result for the utterance |
 | S→C | `response.text.delta` | streamed LLM text |
 | S→C | `audio.chunk` | `pcm` + `seq` (from 0), one TTS sentence per chunk |
