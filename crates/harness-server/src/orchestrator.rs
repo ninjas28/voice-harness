@@ -257,6 +257,18 @@ async fn execute_turn(
         append_tool_round(&mut extra, &tool_calls, &results);
     }
 
+    // glm53 occasionally finishes a round with no text and no tool calls
+    // (nondeterministic empty replies). Surface that as an upstream error so
+    // clients don't read the silence as a normal turn end.
+    if final_text.trim().is_empty() {
+        let _ = events
+            .send(ServerMsg::Error {
+                code: "upstream".into(),
+                message: "model returned an empty answer".into(),
+            })
+            .await;
+    }
+
     let _ = events
         .send(ServerMsg::ResponseText {
             text: final_text.clone(),

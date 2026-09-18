@@ -539,6 +539,37 @@ async fn unknown_tool_returns_error_payload_to_llm() {
 }
 
 #[tokio::test]
+async fn empty_reply_emits_upstream_error() {
+    // glm53 sometimes finishes a round with no deltas and no tool calls; the
+    // turn must surface that as an upstream error instead of silence.
+    let llm = Arc::new(MockLlm::new(vec![vec![LlmEvent::Done {
+        finish_reason: Some("stop".into()),
+    }]]));
+    let deps = deps_with(llm, Arc::new(MockTts::new()), PluginRegistry::new());
+
+    let (tx, rx) = mpsc::channel(64);
+    let mut session = Session::default();
+    run_text_turn(&deps, &mut session, "hi", tx).await.unwrap();
+
+    let events = collect_events_all(rx).await;
+    let errors: Vec<&ServerMsg> = events
+        .iter()
+        .filter(|m| matches!(m, ServerMsg::Error { .. }))
+        .collect();
+    assert_eq!(errors.len(), 1, "exactly one error frame: {events:?}");
+    match errors[0] {
+        ServerMsg::Error { code, message } => {
+            assert_eq!(code, "upstream");
+            assert!(
+                message.contains("empty answer"),
+                "message names the empty answer: {message}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn session_store_isolates_sessions() {
     let store = SessionStore::new();
     let a = store.get("dev-a").await;
