@@ -36,6 +36,12 @@ pub enum ServerMsg {
     State {
         state: SessionState,
     },
+    #[serde(rename = "state.thinking")]
+    StateThinking {
+        /// `calling_tools` while a plugin/tool call is in flight; default = plain thinking.
+        #[serde(default)]
+        detail: ThinkingDetail,
+    },
     Transcript {
         text: String,
     },
@@ -68,6 +74,15 @@ pub enum SessionState {
     Speech,
     Thinking,
     Speaking,
+}
+
+/// Sub-detail for `state.thinking`: what "thinking" is currently doing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingDetail {
+    #[default]
+    Thinking,
+    CallingTools,
 }
 
 #[cfg(test)]
@@ -178,6 +193,27 @@ mod tests {
             let back: SessionState = serde_json::from_str(&json).unwrap();
             assert_eq!(back, st);
         }
+    }
+
+    #[test]
+    fn server_msg_state_thinking_wire_shape() {
+        let msg = ServerMsg::StateThinking {
+            detail: ThinkingDetail::CallingTools,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"state.thinking","detail":"calling_tools"}"#
+        );
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+        let default: ServerMsg = serde_json::from_str(r#"{"type":"state.thinking"}"#).unwrap();
+        assert_eq!(
+            default,
+            ServerMsg::StateThinking {
+                detail: ThinkingDetail::Thinking
+            }
+        );
     }
 
     #[test]

@@ -187,6 +187,7 @@ fn short_names(events: &[ServerMsg]) -> Vec<&'static str> {
         .iter()
         .map(|m| match m {
             ServerMsg::State { .. } => "state",
+            ServerMsg::StateThinking { .. } => "state_thinking",
             ServerMsg::Transcript { .. } => "transcript",
             ServerMsg::ResponseTextDelta { .. } => "delta",
             ServerMsg::ResponseText { .. } => "response_text",
