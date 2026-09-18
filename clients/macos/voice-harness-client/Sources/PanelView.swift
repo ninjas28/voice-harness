@@ -46,8 +46,15 @@ struct PanelView: View {
                 }
             }
             HStack {
-                Text("Assistant").font(.caption).foregroundStyle(.secondary)
-                if runtime.phase == .thinking { ThinkingDots() }
+                Text("Assistant")
+                    .font(.caption)
+                    .foregroundStyle(assistantColor)
+                if runtime.activity != .idle { ThinkingDots() }
+                if !assistantStatus.isEmpty {
+                    Text(assistantStatus)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             Text(displayText)
                 .font(.body)
@@ -114,8 +121,29 @@ struct PanelView: View {
         }
     }
 
+    /// Assistant-row state. Dots run whenever the model is under `thinking`;
+    /// `calling tools…` surfaces the tool round that used to be invisible.
+    private var assistantStatus: String {
+        switch runtime.activity {
+        case .callingTools: "calling tools…"
+        case .thinking, .idle: ""
+        }
+    }
+
+    private var assistantColor: Color {
+        switch runtime.activity {
+        case .idle: .gray
+        case .thinking: .yellow
+        case .callingTools: .orange
+        }
+    }
+
+    /// Empty while plain thinking; `… (calling tools)` while the model is
+    /// inside a tool round so the text itself distinguishes the sub-state.
     private var displayText: String {
-        if runtime.responseText.isEmpty && runtime.phase == .thinking { return "…" }
+        if runtime.responseText.isEmpty && runtime.phase == .thinking {
+            return runtime.activity == .callingTools ? "… (calling tools)" : "…"
+        }
         return runtime.responseText.isEmpty ? " " : runtime.responseText
     }
 

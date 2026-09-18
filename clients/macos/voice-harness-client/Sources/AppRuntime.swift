@@ -15,6 +15,8 @@ final class AppRuntime: ObservableObject {
     @Published private(set) var transcript: String?
     @Published private(set) var responseText = ""
     @Published private(set) var errorMessage: String?
+    /// Mirrors `model.activity`: what the assistant is doing under `thinking`.
+    @Published private(set) var activity: HarnessSessionModel.Activity = .idle
     /// TTS playback speed — persisted; applied to the live player too.
     @Published var playbackRate: Float = AppSettings.ttsRate {
         didSet {
@@ -48,6 +50,7 @@ final class AppRuntime: ObservableObject {
             self?.transcript = $0.isEmpty ? nil : $0
         }.store(in: &cancellables)
         model.$responseText.dropFirst().sink { [weak self] in self?.responseText = $0 }.store(in: &cancellables)
+        model.$activity.dropFirst().sink { [weak self] in self?.activity = $0 }.store(in: &cancellables)
         model.$errorMessage.dropFirst().sink { [weak self] in self?.errorMessage = $0 }.store(in: &cancellables)
     }
 
