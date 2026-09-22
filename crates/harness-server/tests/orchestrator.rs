@@ -193,6 +193,7 @@ fn short_names(events: &[ServerMsg]) -> Vec<&'static str> {
             ServerMsg::ResponseText { .. } => "response_text",
             ServerMsg::AudioChunk { .. } => "audio",
             ServerMsg::TurnCompleted => "turn_completed",
+            ServerMsg::ToolCall { .. } => "tool_call",
             ServerMsg::Error { .. } => "error",
         })
         .collect()

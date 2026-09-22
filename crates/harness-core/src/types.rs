@@ -28,6 +28,32 @@ pub enum ClientMsg {
     SpeechEnd,
     #[serde(rename = "session.stop")]
     SessionStop,
+    #[serde(rename = "context.announce")]
+    ContextAnnounce { providers: Vec<ProviderDescriptor> },
+    #[serde(rename = "tool.result")]
+    ToolResult {
+        call_id: u64,
+        ok: bool,
+        text: String,
+    },
+}
+
+/// One client-side context provider announced via `context.announce`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderDescriptor {
+    pub id: String,
+    pub tools: Vec<ToolDescriptor>,
+}
+
+/// A tool exposed by a client provider (bare name; the server namespaces it to
+/// `personal.<provider>.<tool>`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolDescriptor {
+    pub name: String,
+    pub description: String,
+    /// JSON schema for the arguments object; defaults to an empty object.
+    #[serde(default)]
+    pub parameters: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,6 +87,13 @@ pub enum ServerMsg {
     },
     #[serde(rename = "turn.completed")]
     TurnCompleted,
+    #[serde(rename = "tool.call")]
+    ToolCall {
+        call_id: u64,
+        name: String,
+        /// JSON-encoded arguments string, OpenAI style.
+        arguments: String,
+    },
     Error {
         code: String,
         message: String,
@@ -214,6 +247,53 @@ mod tests {
                 detail: ThinkingDetail::Thinking
             }
         );
+    }
+
+    #[test]
+    fn context_announce_wire_shape() {
+        // Single-line wire JSON: serde emits compact output, so the expected
+        // string must be compact too (and balanced — the plan snippet omitted
+        // the tool object's closing brace).
+        let json = r#"{"type":"context.announce","providers":[{"id":"calendar","tools":[{"name":"calendar.events","description":"List events.","parameters":{"properties":{},"type":"object"}}]}]}"#;
+        let de: ClientMsg = serde_json::from_str(json).unwrap();
+        let ClientMsg::ContextAnnounce { providers } = de.clone() else {
+            panic!("wrong variant")
+        };
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "calendar");
+        assert_eq!(providers[0].tools[0].name, "calendar.events");
+        assert_eq!(serde_json::to_string(&de).unwrap(), json);
+    }
+
+    #[test]
+    fn tool_result_wire_shape() {
+        let json = r#"{"type":"tool.result","call_id":7,"ok":true,"text":"3 events"}"#;
+        let de: ClientMsg = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            de,
+            ClientMsg::ToolResult {
+                call_id: 7,
+                ok: true,
+                text: "3 events".into()
+            }
+        );
+        assert_eq!(serde_json::to_string(&de).unwrap(), json);
+    }
+
+    #[test]
+    fn server_tool_call_wire_shape() {
+        let msg = ServerMsg::ToolCall {
+            call_id: 3,
+            name: "personal.contacts.search".into(),
+            arguments: r#"{"query":"mom"}"#.into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"tool.call","call_id":3,"name":"personal.contacts.search","arguments":"{\"query\":\"mom\"}"}"#
+        );
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
     }
 
     #[test]

@@ -449,6 +449,11 @@ impl ConnState {
                 self.hold_deadline = None;
                 return true; // clean disconnect
             }
+            // Client context catalog + tool results: WS plumbing (announce
+            // storage, per-turn result inbox) lands with the personal-context
+            // tasks. Until then they are accepted on the wire and ignored.
+            ClientMsg::ContextAnnounce { .. } => {}
+            ClientMsg::ToolResult { .. } => {}
         }
         false
     }
