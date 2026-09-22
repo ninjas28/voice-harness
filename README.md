@@ -82,18 +82,35 @@ JSON text frames with dotted `type` tags; audio is base64 PCM16, 16 kHz mono.
 | C→S | `session.start` | `device_id?`, `sample_rate?` (default 16000) |
 | C→S | `audio.data` | `pcm` (base64 PCM16); arbitrary framing is fine |
 | C→S | `speech.end` | optional; server-side VAD also endpointed |
+| C→S | `context.announce` | `providers`: client-side personal-context catalog (bare tool names); empty list clears it |
+| C→S | `tool.result` | `call_id`, `ok`, `text` digest for a prior `tool.call` |
 | C→S | `session.stop` | ends the session |
 | S→C | `state` | `listening` / `speech` / `thinking` / `speaking` |
 | S→C | `state.thinking` | `detail`: `calling_tools` while a tool call is in flight; bare = plain thinking |
 | S→C | `transcript` | STT result for the utterance |
 | S→C | `response.text.delta` | streamed LLM text |
 | S→C | `audio.chunk` | `pcm` + `seq` (from 0), one TTS sentence per chunk |
+| S→C | `tool.call` | `call_id`, `name` (`personal.<provider>.<tool>`), `arguments` (JSON string) — routed to the announcing client |
 | S→C | `turn.completed` | turn finished server-side |
 | S→C | `error` | `code` + `message` |
 
 `POST /v1/turn` accepts `{"text": "..."}` or `{"audio_base64": "..."}`
 (WAV/PCM16) and returns transcript, response text, and full audio in one JSON
 body. All endpoints require `Authorization: Bearer <api_key>`.
+
+### Personal context tools
+
+The macOS/iOS clients can execute personal-context tools on-device and hand
+the LLM compact speakable digests: calendar events and reminders (EventKit),
+contacts (Contacts framework), and photo-library digests (PhotoKit — counts,
+dates, favorites; no access to Apple's semantic captions). A toggle in the
+macOS panel opts in (that single toggle triggers the calendar/reminders,
+contacts, and photos permission prompts); authorized providers announce
+themselves at session start, the LLM sees tools named
+`personal.<provider>.<tool>`, and mid-turn calls are routed to the client over
+the WebSocket. Configure `[personal_context]` in `voice-harness.toml`
+(`enabled`, `call_timeout_secs`, `max_result_bytes`); the HTTP surface cannot
+serve personal tools (no client connection to execute them).
 
 ### Sentence-end gate
 
@@ -165,7 +182,7 @@ cargo run --release --example loopback -- \
 - `clients/ios/voice-harness-client` is an XcodeGen project: run
   `xcodegen generate` (from that directory), then build with
   `xcodebuild -project VoiceHarnessApp.xcodeproj -scheme VoiceHarnessApp
-  -destination 'platform=iOS Simulator,name=iPhone 16 Pro,OS=18.5' build`.
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' build`.
 - It consumes the same `voicekit` package as the macOS client (SwiftPM path
   dependency; the package exposes it as a library product). Protocol,
   transport, audio, settings, and session-model code is single-sourced, and

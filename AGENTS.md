@@ -34,10 +34,13 @@ config/voice-harness.toml             server config (API keys — never commit)
 ## Wire protocol (dotted tags)
 
 Client → server: `session.start` (sample_rate, default 16000), `audio.data`
-(base64 PCM16 16 kHz mono), `speech.end`, `session.stop`.
-Server → client: `state` (listening|speech|thinking|speaking), `transcript`,
+(base64 PCM16 16 kHz mono), `speech.end`, `session.stop`, `context.announce`
+(client-side provider catalog, bare tool names), `tool.result` (call_id, ok,
+text digest).
+Server → client: `state` (listening|speech|thinking|speaking), `state.thinking`
+(detail: calling_tools while a tool call is in flight), `transcript`,
 `response.text.delta`, `audio.chunk` (base64 PCM16 16 kHz mono, seq from 0),
-`turn.completed`, `error`.
+`tool.call` (call_id, name, JSON-string arguments), `turn.completed`, `error`.
 
 ## Non-negotiable workflow
 
@@ -178,6 +181,27 @@ need zero changes.
   and timeout-bounded everywhere — no MCP SDK dependency.
 - Session handling: `Mcp-Session-Id` is tracked per server; a 404 re-initializes once
   and retries. Only `initialize` / `tools/list` / `tools/call` are spoken.
+
+## Personal context (client-executed tools)
+
+- Clients may announce personal-context providers over the WS
+  (`context.announce`, bare tool names). The server namespaces them
+  `personal.<provider>.<tool>`, appends them to the LLM tool list, and routes
+  `personal.*` calls back to the announcing client as `tool.call`; the client
+  replies `tool.result` (call_id, ok, text). Catalog lives on the `Session` —
+  a fresh `session.start` resets it, an empty announce clears it.
+- Routing is an orchestrator branch, NOT a `Plugin` — the Plugin trait has no
+  per-connection context. Gate: `[personal_context]` (`enabled`,
+  `call_timeout_secs` 10, `max_result_bytes` 8192). Late/oversized results are
+  dropped/clamped; every wait is bounded.
+- The LLM only ever sees compact speakable text digests — never raw SQLite,
+  file paths, or wire JSON. Providers (voicekit `PersonalContext/`): EventKit
+  (calendar + reminders), Contacts, PhotoKit. Authorization is lazy: a
+  provider announces only once authorized; the panel toggle is the one
+  deliberate TCC prompt. Never trigger TCC prompts from tests or unattended
+  runs — they hang the session.
+- HTTP `POST /v1/turn` passes no result inbox: `personal.*` calls there error
+  cleanly ("requires a connected client").
 
 ## Client deployment (macOS)
 
