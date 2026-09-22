@@ -21,6 +21,10 @@ use tokio_stream::StreamExt;
 /// ha_search) recover from bad calls and still answer.
 const MAX_TOOL_ROUNDS: usize = 8;
 
+/// Per-turn inbox of client tool results, handed over by the WS layer.
+/// `None` on surfaces without a client (HTTP `POST /v1/turn`).
+pub type ToolInbox = mpsc::Receiver<(u64, bool, String)>;
+
 /// Injected provider set driving a turn. Trait objects throughout so tests can
 /// drive mocks (and `main.rs` wires the real clients).
 pub struct Deps {
@@ -209,6 +213,7 @@ async fn execute_turn(
     session: &mut crate::state::Session,
     user_text: &str,
     events: mpsc::Sender<ServerMsg>,
+    _inbox: Option<&mut ToolInbox>,
 ) -> Result<(), HarnessError> {
     session
         .history
@@ -283,14 +288,16 @@ async fn execute_turn(
 }
 
 /// Run a full text turn: prompt → (streamed LLM → TTS chunks, bounded tool
-/// rounds) → `ResponseText` + `TurnCompleted`.
+/// rounds) → `ResponseText` + `TurnCompleted`. `inbox` is the per-turn client
+/// tool-result channel (WS); `None` on clientless surfaces (HTTP turn).
 pub async fn run_text_turn(
     deps: &Deps,
     session: &mut crate::state::Session,
     user_text: &str,
     events: mpsc::Sender<ServerMsg>,
+    inbox: Option<&mut ToolInbox>,
 ) -> Result<(), HarnessError> {
-    execute_turn(deps, session, user_text, events.clone()).await?;
+    execute_turn(deps, session, user_text, events.clone(), inbox).await?;
     let _ = events.send(ServerMsg::TurnCompleted).await;
     Ok(())
 }
@@ -304,6 +311,7 @@ pub async fn run_audio_utterance(
     session: &mut crate::state::Session,
     pcm16k: &[i16],
     events: mpsc::Sender<ServerMsg>,
+    inbox: Option<&mut ToolInbox>,
 ) -> Result<(), HarnessError> {
     let text = deps.stt.transcribe(pcm16k).await?;
     let _ = events
@@ -315,7 +323,7 @@ pub async fn run_audio_utterance(
         return Ok(());
     }
 
-    execute_turn(deps, session, &text, events.clone()).await?;
+    execute_turn(deps, session, &text, events.clone(), inbox).await?;
     let _ = events.send(ServerMsg::TurnCompleted).await;
     Ok(())
 }

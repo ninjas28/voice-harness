@@ -10,6 +10,8 @@ use std::sync::Arc;
 use harness_providers::llm::ChatMessage;
 use tokio::sync::RwLock;
 
+use crate::client_tools::ClientCatalog;
+
 pub type SessionId = String;
 
 /// One conversation: rolling message history plus the device that owns it.
@@ -17,6 +19,10 @@ pub type SessionId = String;
 pub struct Session {
     pub history: VecDeque<ChatMessage>,
     pub device_id: Option<String>,
+    /// Client-announced personal-context catalog (empty = none). Set by
+    /// `context.announce` on the WS; cleared when a fresh `session.start`
+    /// rebinding the id arrives.
+    pub context: ClientCatalog,
 }
 
 impl Session {
@@ -24,6 +30,7 @@ impl Session {
         Self {
             history: VecDeque::new(),
             device_id,
+            context: ClientCatalog::default(),
         }
     }
 }
@@ -95,5 +102,24 @@ mod tests {
         let mut h: VecDeque<ChatMessage> = vec![msg("user"), msg("assistant")].into();
         trim_history(&mut h, 8);
         assert_eq!(h.len(), 2);
+    }
+
+    #[test]
+    fn session_defaults_to_empty_context_catalog() {
+        let s = Session::default();
+        assert!(
+            s.context.is_empty(),
+            "a session without an announce has no client tools"
+        );
+        assert!(s.context.openai_tool_specs().is_empty());
+    }
+
+    #[test]
+    fn with_device_has_empty_context_catalog() {
+        let s = Session::with_device(Some("dev-a".into()));
+        assert!(
+            s.context.is_empty(),
+            "a fresh session never inherits a client catalog"
+        );
     }
 }

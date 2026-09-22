@@ -179,15 +179,18 @@ async fn turn_handler(
         let mut session = session.write().await;
         let (tx, rx) = mpsc::channel(EVENT_CHANNEL_BOUND);
         let text = req.text;
-        let collected =
-            await_turn_collect(run_text_turn(&orchestrator, &mut session, &text, tx), rx).await?;
+        let collected = await_turn_collect(
+            run_text_turn(&orchestrator, &mut session, &text, tx, None),
+            rx,
+        )
+        .await?;
         Ok(Json(format_turn(collected, Some(text))))
     } else if ct.starts_with("audio/wav") || ct.starts_with("audio/x-wav") {
         let pcm = parse_wav_body(&body)?;
         let mut session = Session::default();
         let (tx, rx) = mpsc::channel(EVENT_CHANNEL_BOUND);
         let collected = await_turn_collect(
-            run_audio_utterance(&orchestrator, &mut session, &pcm, tx),
+            run_audio_utterance(&orchestrator, &mut session, &pcm, tx, None),
             rx,
         )
         .await?;

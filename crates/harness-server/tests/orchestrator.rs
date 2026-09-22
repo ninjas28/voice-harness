@@ -209,7 +209,7 @@ async fn text_turn_streams_deltas_and_chunked_audio() {
 
     let (tx, rx) = mpsc::channel(64);
     let mut session = Session::default();
-    run_text_turn(&deps, &mut session, "hi", tx)
+    run_text_turn(&deps, &mut session, "hi", tx, None)
         .await
         .expect("turn completes");
 
@@ -265,7 +265,9 @@ async fn text_turn_prompt_includes_system_and_datetime() {
 
     let (tx, mut rx) = mpsc::channel(64);
     let mut session = Session::default();
-    run_text_turn(&deps, &mut session, "hi", tx).await.unwrap();
+    run_text_turn(&deps, &mut session, "hi", tx, None)
+        .await
+        .unwrap();
     let _ = rx.recv().await; // drain without asserting
 
     let reqs = llm.requests();
@@ -294,7 +296,7 @@ async fn text_turn_appends_and_trims_history() {
     let mut session = Session::default();
     for i in 0..10 {
         let (tx, _rx) = mpsc::channel(64);
-        run_text_turn(&deps, &mut session, &format!("msg {i}"), tx)
+        run_text_turn(&deps, &mut session, &format!("msg {i}"), tx, None)
             .await
             .unwrap();
     }
@@ -344,7 +346,7 @@ async fn tool_call_round_dispatches_and_feeds_result_to_llm() {
 
     let (tx, rx) = mpsc::channel(64);
     let mut session = Session::default();
-    run_text_turn(&deps, &mut session, "what time is it", tx)
+    run_text_turn(&deps, &mut session, "what time is it", tx, None)
         .await
         .unwrap();
     let _ = collect_events_all(rx).await; // drain: delta, audio, response_text, turn_completed
@@ -433,7 +435,7 @@ async fn tool_call_round_emits_thinking_signal() {
             state: harness_core::types::SessionState::Thinking,
         })
         .await;
-    run_text_turn(&deps, &mut session, "what time is it", tx)
+    run_text_turn(&deps, &mut session, "what time is it", tx, None)
         .await
         .unwrap();
     let events = collect_events_all(rx).await;
@@ -486,7 +488,7 @@ async fn tool_loop_is_capped_at_seven_rounds() {
 
     let (tx, _rx) = mpsc::channel(64);
     let mut session = Session::default();
-    run_text_turn(&deps, &mut session, "loop forever", tx)
+    run_text_turn(&deps, &mut session, "loop forever", tx, None)
         .await
         .unwrap();
 
@@ -517,7 +519,7 @@ async fn unknown_tool_returns_error_payload_to_llm() {
 
     let (tx, _rx) = mpsc::channel(64);
     let mut session = Session::default();
-    run_text_turn(&deps, &mut session, "do the thing", tx)
+    run_text_turn(&deps, &mut session, "do the thing", tx, None)
         .await
         .unwrap();
 
@@ -550,7 +552,9 @@ async fn empty_reply_emits_upstream_error() {
 
     let (tx, rx) = mpsc::channel(64);
     let mut session = Session::default();
-    run_text_turn(&deps, &mut session, "hi", tx).await.unwrap();
+    run_text_turn(&deps, &mut session, "hi", tx, None)
+        .await
+        .unwrap();
 
     let events = collect_events_all(rx).await;
     let errors: Vec<&ServerMsg> = events
@@ -620,7 +624,7 @@ async fn audio_utterance_transcribes_then_runs_pipeline() {
 
     let (tx, rx) = mpsc::channel(64);
     let mut session = Session::default();
-    run_audio_utterance(&deps, &mut session, &[1i16; 480], tx)
+    run_audio_utterance(&deps, &mut session, &[1i16; 480], tx, None)
         .await
         .expect("audio turn completes");
 
@@ -663,7 +667,7 @@ async fn audio_utterance_empty_transcript_skips_llm() {
 
     let (tx, rx) = mpsc::channel(64);
     let mut session = Session::default();
-    run_audio_utterance(&deps, &mut session, &[1i16; 480], tx)
+    run_audio_utterance(&deps, &mut session, &[1i16; 480], tx, None)
         .await
         .expect("empty-audio turn completes");
 
@@ -704,7 +708,7 @@ async fn llm_reasoning_effort_flows_from_config_into_every_request() {
 
     let (tx, rx) = mpsc::channel(64);
     let mut session = Session::default();
-    run_text_turn(&deps, &mut session, "hi", tx)
+    run_text_turn(&deps, &mut session, "hi", tx, None)
         .await
         .expect("turn completes");
     let _ = collect_events_all(rx).await;
@@ -726,7 +730,7 @@ async fn llm_reasoning_effort_flows_from_config_into_every_request() {
     );
     let (tx2, rx2) = mpsc::channel(64);
     let mut session2 = Session::default();
-    run_text_turn(&deps2, &mut session2, "hi", tx2)
+    run_text_turn(&deps2, &mut session2, "hi", tx2, None)
         .await
         .expect("turn completes");
     let _ = collect_events_all(rx2).await;

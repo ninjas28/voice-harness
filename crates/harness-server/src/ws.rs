@@ -21,6 +21,7 @@ use harness_core::vad::{Utterance, UtteranceAssembler, VadPolicy, WebrtcVad};
 use harness_providers::stt_realtime::{spawn_link, RealtimeSttLink, SttRealtimeEvent};
 use tokio::sync::mpsc;
 
+use crate::client_tools::ClientCatalog;
 use crate::http::RouterDeps;
 use crate::orchestrator::{run_text_turn, Deps};
 use crate::state::SessionStore;
@@ -219,6 +220,10 @@ struct ConnState {
     stt: SttMode,
     /// In-flight turn task; aborted by session.stop / new session.start.
     turn: Option<tokio::task::JoinHandle<()>>,
+    /// Sender half of the per-turn client tool-result inbox; the orchestrator
+    /// holds the receiver. `Some` only while a turn is in flight — a
+    /// `tool.result` with no inbox is late and dropped.
+    client_results: Option<mpsc::Sender<(u64, bool, String)>>,
     /// Sentence-end gate: transcript finalized but not yet sentence-terminal,
     /// waiting for the next utterance (or the flush deadline). Empty = none.
     held_transcript: String,
@@ -255,6 +260,7 @@ impl ConnState {
             sample_rate: 16_000,
             stt,
             turn: None,
+            client_results: None,
             held_transcript: String::new(),
             upstream_partial: String::new(),
             hold_deadline: None,
@@ -298,6 +304,15 @@ impl ConnState {
                 // stale (its device has moved on).
                 self.held_transcript.clear();
                 self.hold_deadline = None;
+                // The announced client catalog belongs to the previous
+                // connection too: a fresh `session.start` (including a
+                // reconnect) resets it — the client re-announces.
+                if let Some(id) = self.session_id.clone() {
+                    let session = self.sessions.get(id).await;
+                    session.write().await.context = ClientCatalog::default();
+                }
+                // Any per-turn inbox is stale with the aborted turn.
+                self.client_results = None;
                 // The upstream link belongs to the previous session: tear it
                 // down so the upstream sees the socket close (lazy reconnect
                 // re-dials with the new session's sample rate on the next
@@ -447,13 +462,48 @@ impl ConnState {
                 self.session_id = None;
                 self.held_transcript.clear();
                 self.hold_deadline = None;
+                // No turn can be in flight after the abort: late results
+                // would have nowhere to go.
+                self.client_results = None;
                 return true; // clean disconnect
             }
-            // Client context catalog + tool results: WS plumbing (announce
-            // storage, per-turn result inbox) lands with the personal-context
-            // tasks. Until then they are accepted on the wire and ignored.
-            ClientMsg::ContextAnnounce { .. } => {}
-            ClientMsg::ToolResult { .. } => {}
+            // Client context catalog: upsert on the bound session. No session
+            // yet (announce before `session.start`) → warn + ignore: the
+            // client re-announces after the handshake per the protocol order.
+            ClientMsg::ContextAnnounce { providers } => match self.session_id.clone() {
+                Some(id) => {
+                    let session = self.sessions.get(id).await;
+                    session.write().await.context = ClientCatalog::from_announce(providers);
+                }
+                None => {
+                    tracing::warn!(
+                        "context.announce before session.start: ignored ({} providers)",
+                        providers.len()
+                    );
+                }
+            },
+            // A client tool result for an in-flight turn: forward it into the
+            // per-turn inbox the orchestrator is waiting on. No inbox (turn
+            // already finished / timed out / never started) → late result,
+            // warn + drop. Full inbox (capacity 4) → drop the newest so a
+            // flooding client can never backpressure the read loop.
+            ClientMsg::ToolResult { call_id, ok, text } => match self.client_results.clone() {
+                Some(tx) => {
+                    if let Err(e) = tx.try_send((call_id, ok, text)) {
+                        // Full = the orchestrator is not draining fast enough
+                        // (or is stuck): drop the newest. Closed = the turn
+                        // task finished between the clone and this send.
+                        let why = match e {
+                            mpsc::error::TrySendError::Full(_) => "turn inbox full",
+                            mpsc::error::TrySendError::Closed(_) => "turn inbox closed",
+                        };
+                        tracing::warn!("tool.result for call {call_id} dropped: {why}");
+                    }
+                }
+                None => {
+                    tracing::warn!("late tool.result for call {call_id}: no turn is waiting");
+                }
+            },
         }
         false
     }
@@ -595,6 +645,11 @@ impl ConnState {
         let session_id = self.session_id.clone().unwrap_or_else(next_session_id);
         let store = self.sessions.clone();
         let text = text.to_string();
+        // Per-turn inbox of client tool results: the WS read loop forwards
+        // `tool.result` frames into `tx` while this turn runs; the
+        // orchestrator waits on `rx` for the call it dispatched.
+        let (result_tx, mut result_rx) = mpsc::channel(4);
+        self.client_results = Some(result_tx.clone());
         let turn = tokio::spawn(async move {
             let session = store.get(session_id).await;
             let mut session = session.write().await;
@@ -604,7 +659,15 @@ impl ConnState {
                     state: SessionState::Thinking,
                 })
                 .await;
-            if let Err(e) = run_text_turn(&deps, &mut session, &text, out.clone()).await {
+            if let Err(e) = run_text_turn(
+                &deps,
+                &mut session,
+                &text,
+                out.clone(),
+                Some(&mut result_rx),
+            )
+            .await
+            {
                 let _ = out
                     .send(ServerMsg::Error {
                         code: "turn".into(),
@@ -623,6 +686,9 @@ impl ConnState {
                     state: SessionState::Listening,
                 })
                 .await;
+            // Turn over: results arriving from here on are late (dropped by
+            // the read loop once this clears).
+            drop(result_tx);
         });
         self.turn = Some(turn);
     }
@@ -759,4 +825,248 @@ fn next_session_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     format!("conn-{}", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::SessionStore;
+    use harness_core::config::Config;
+    use harness_core::types::{ProviderDescriptor, ToolDescriptor};
+
+    fn calendar_announce() -> Vec<ProviderDescriptor> {
+        vec![ProviderDescriptor {
+            id: "calendar".into(),
+            tools: vec![ToolDescriptor {
+                name: "events".into(),
+                description: "List events.".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+        }]
+    }
+
+    /// A bare `ConnState` with a stub deps factory (never invoked by the
+    /// handlers under test) and a fresh session store.
+    fn conn() -> (ConnState, mpsc::Receiver<ServerMsg>) {
+        let (out_tx, out_rx) = mpsc::channel(64);
+        let ws = WsState {
+            config: Config::default(),
+            deps_factory: Arc::new(|| Deps {
+                config: Config::default(),
+                llm: Arc::new(DeadLlm),
+                tts: Arc::new(DeadTts),
+                stt: Arc::new(DeadStt),
+                plugins: Arc::new(harness_plugins::PluginRegistry::new()),
+            }),
+            sessions: Arc::new(SessionStore::new()),
+            stt_realtime: None,
+        };
+        (ConnState::new(&ws, out_tx), out_rx)
+    }
+
+    // -------------------------------------------------- mock providers
+    // The handlers under test never call these; they only satisfy `Deps`.
+
+    struct DeadLlm;
+    #[async_trait::async_trait]
+    impl harness_providers::llm::LlmProvider for DeadLlm {
+        async fn stream_chat(
+            &self,
+            _req: harness_providers::llm::ChatRequest,
+        ) -> Result<harness_providers::llm::ChatStream, harness_core::error::HarnessError> {
+            Err(harness_core::error::HarnessError::protocol("unused"))
+        }
+    }
+
+    struct DeadTts;
+    #[async_trait::async_trait]
+    impl harness_providers::tts::TtsProvider for DeadTts {
+        async fn synthesize(
+            &self,
+            _text: &str,
+        ) -> Result<Vec<u8>, harness_core::error::HarnessError> {
+            Err(harness_core::error::HarnessError::protocol("unused"))
+        }
+    }
+
+    struct DeadStt;
+    #[async_trait::async_trait]
+    impl harness_providers::stt::SttProvider for DeadStt {
+        async fn transcribe(
+            &self,
+            _pcm16k: &[i16],
+        ) -> Result<String, harness_core::error::HarnessError> {
+            Err(harness_core::error::HarnessError::protocol("unused"))
+        }
+    }
+
+    #[tokio::test]
+    async fn context_announce_stores_catalog_on_session() {
+        let (mut conn, _rx) = conn();
+        conn.on_text(r#"{"type":"session.start","device_id":"dev-a"}"#)
+            .await;
+        let providers = calendar_announce();
+        let msg = serde_json::to_string(&ClientMsg::ContextAnnounce { providers }).unwrap();
+        conn.on_text(&msg).await;
+
+        let session = conn.sessions.get("dev-a").await;
+        let session = session.read().await;
+        assert!(
+            !session.context.is_empty(),
+            "announce must store the catalog on the session"
+        );
+        assert_eq!(session.context.providers.len(), 1);
+        assert_eq!(
+            session
+                .context
+                .resolve("personal.calendar.events")
+                .expect("announced tool is routable")
+                .name,
+            "events"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_announce_without_session_is_ignored() {
+        let (mut conn, mut rx) = conn();
+        // No session.start: the announce has nowhere to land.
+        let msg = serde_json::to_string(&ClientMsg::ContextAnnounce {
+            providers: calendar_announce(),
+        })
+        .unwrap();
+        let end = conn.on_text(&msg).await;
+        assert!(!end, "announce before session.start must not close");
+        // No error frame either: tolerated + logged, connection usable.
+        assert!(
+            rx.try_recv().is_err(),
+            "no outbound frame for a session-less announce"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_start_resets_stale_catalog() {
+        let (mut conn, _rx) = conn();
+        conn.on_text(r#"{"type":"session.start","device_id":"dev-a"}"#)
+            .await;
+        let msg = serde_json::to_string(&ClientMsg::ContextAnnounce {
+            providers: calendar_announce(),
+        })
+        .unwrap();
+        conn.on_text(&msg).await;
+
+        // A reconnect with the same device id starts fresh: any catalog left
+        // by the previous connection is stale.
+        conn.on_text(r#"{"type":"session.start","device_id":"dev-a"}"#)
+            .await;
+        let session = conn.sessions.get("dev-a").await;
+        let session = session.read().await;
+        assert!(
+            session.context.is_empty(),
+            "fresh session.start clears a stale announce"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_result_reaches_the_turn_inbox() {
+        let (mut conn, _rx) = conn();
+        conn.on_text(r#"{"type":"session.start","device_id":"dev-a"}"#)
+            .await;
+        let (tx, mut inbx) = mpsc::channel(4);
+        conn.client_results = Some(tx);
+
+        let msg = serde_json::to_string(&ClientMsg::ToolResult {
+            call_id: 7,
+            ok: true,
+            text: "Dentist 9:30".into(),
+        })
+        .unwrap();
+        conn.on_text(&msg).await;
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(1), inbx.recv())
+            .await
+            .expect("result forwarded within bound");
+        assert_eq!(got, Some((7, true, "Dentist 9:30".to_string())));
+    }
+
+    #[tokio::test]
+    async fn tool_result_without_turn_is_dropped() {
+        let (mut conn, mut rx) = conn();
+        conn.on_text(r#"{"type":"session.start","device_id":"dev-a"}"#)
+            .await;
+        // The session.start ack (State(listening)) is still queued — it is
+        // not part of this test's subject. Drain it first so any frame the
+        // tool.result handler (wrongly) emits is deterministic.
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(ServerMsg::State {
+                state: SessionState::Listening
+            })
+        );
+        // No in-flight turn: no `client_results` sender.
+        let msg = serde_json::to_string(&ClientMsg::ToolResult {
+            call_id: 3,
+            ok: true,
+            text: "late".into(),
+        })
+        .unwrap();
+        let end = conn.on_text(&msg).await;
+        assert!(!end, "a late tool.result must not close the connection");
+        // Allow a moment for any (wrong) outbound frame, then assert none.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "dropped result sends no outbound frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_result_inbox_drops_the_newest_result() {
+        let (mut conn, _rx) = conn();
+        conn.on_text(r#"{"type":"session.start","device_id":"dev-a"}"#)
+            .await;
+        let (tx, mut inbx) = mpsc::channel(4);
+        conn.client_results = Some(tx);
+        // Fill the inbox to capacity (4).
+        for i in 0..4 {
+            let msg = serde_json::to_string(&ClientMsg::ToolResult {
+                call_id: i,
+                ok: true,
+                text: "fill".into(),
+            })
+            .unwrap();
+            conn.on_text(&msg).await;
+        }
+        // Fifth result: capacity full → warn + drop, connection stays open.
+        let msg = serde_json::to_string(&ClientMsg::ToolResult {
+            call_id: 99,
+            ok: true,
+            text: "overflow".into(),
+        })
+        .unwrap();
+        let end = conn.on_text(&msg).await;
+        assert!(!end, "a full inbox must not close the connection");
+        // Drain: exactly the first 4 results, no fifth.
+        let mut ids = Vec::new();
+        while let Ok(Some((id, _, _))) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), inbx.recv()).await
+        {
+            ids.push(id);
+        }
+        assert_eq!(ids, vec![0, 1, 2, 3], "overflow result is dropped");
+    }
+
+    #[tokio::test]
+    async fn session_stop_clears_the_inbox() {
+        let (mut conn, _rx) = conn();
+        conn.on_text(r#"{"type":"session.start","device_id":"dev-a"}"#)
+            .await;
+        let (tx, _inbx) = mpsc::channel(4);
+        conn.client_results = Some(tx);
+        let stop = conn.on_text(r#"{"type":"session.stop"}"#).await;
+        assert!(stop, "session.stop ends the connection");
+        assert!(
+            conn.client_results.is_none(),
+            "session.stop must clear the per-turn inbox"
+        );
+    }
 }
