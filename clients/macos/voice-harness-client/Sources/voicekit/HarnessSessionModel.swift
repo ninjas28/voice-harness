@@ -58,6 +58,11 @@ public final class HarnessSessionModel: ObservableObject {
             if !audioPending { phase = .listening }
             completionWatchdog?.cancel()
             completionWatchdog = nil
+        case .toolCall:
+            // Personal-context call forwarded to PersonalContextServer by the
+            // runtime. UI-wise already covered by the preceding
+            // `state.thinking(calling_tools)` frame — nothing to change here.
+            break
         case .error(let _, let m):
             errorMessage = m
             phase = .idle
