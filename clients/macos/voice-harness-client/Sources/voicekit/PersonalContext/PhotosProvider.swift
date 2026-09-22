@@ -4,10 +4,12 @@ import Photos
 /// Personal-context provider over PhotoKit: shallow statistics (counts, day
 /// histogram, favorites) for a time window. Photos content itself is never
 /// accessed — digests only. Authorization is lazy (TCC).
-struct PhotosProvider: PersonalContextProvider {
-    let providerId = "photos"
+public struct PhotosProvider: PersonalContextProvider {
+    public let providerId = "photos"
     /// Implementation cap on scanned assets (bounded-everything house rule).
     private static let fetchCap = 500
+
+    public init() {}
 
     static func descriptor() -> ProviderDescriptor {
         ProviderDescriptor(id: "photos", tools: [
@@ -27,11 +29,11 @@ struct PhotosProvider: PersonalContextProvider {
         ])
     }
 
-    func currentDescriptor() async -> ProviderDescriptor? {
+    public func currentDescriptor() async -> ProviderDescriptor? {
         await authorize() ? Self.descriptor() : nil
     }
 
-    func execute(name: String, argumentsJSON: String) async throws -> String {
+    public func execute(name: String, argumentsJSON: String) async throws -> String {
         guard await authorize() else { throw PersonalContextError.notAuthorized("photos") }
         guard name == "digest" else {
             throw PersonalContextError.failed("unknown photos tool '\(name)'")

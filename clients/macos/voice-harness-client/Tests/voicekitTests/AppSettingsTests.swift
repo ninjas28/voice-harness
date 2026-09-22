@@ -160,4 +160,17 @@ final class AppSettingsTests: XCTestCase {
         AppSettings.setAPIKey("   ")
         XCTAssertEqual(AppSettings.apiKey, "")
     }
+
+    // MARK: - Personal context toggle (Task 9)
+
+    func testPersonalContextDefaultsToDisabled() {
+        XCTAssertFalse(AppSettings.personalContextEnabled)
+    }
+
+    func testPersonalContextRoundTrips() {
+        AppSettings.setPersonalContextEnabled(true)
+        XCTAssertTrue(AppSettings.personalContextEnabled)
+        AppSettings.setPersonalContextEnabled(false)
+        XCTAssertFalse(AppSettings.personalContextEnabled)
+    }
 }

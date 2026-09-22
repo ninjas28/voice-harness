@@ -111,6 +111,25 @@ public final class HarnessClient: @unchecked Sendable {
     /// model (on the main actor). Lets the runtime observe frames the model
     /// absorbs silently (e.g. `turn.completed` while audio is pending).
     public var onMessage: (@Sendable (ServerMessage) -> Void)?
+    /// Client-executed personal-context tools, installed by the runtime when
+    /// the user enables them. When present, incoming `personal.*` tool calls
+    /// are routed to it and answered with a `tool.result` on this transport.
+    /// Lock-guarded: written from the main actor (install/uninstall while the
+    /// session is live), read from the receive pump.
+    public var personalContextServer: PersonalContextServer? {
+        get {
+            contextLock.lock()
+            defer { contextLock.unlock() }
+            return personalContextServerStorage
+        }
+        set {
+            contextLock.lock()
+            personalContextServerStorage = newValue
+            contextLock.unlock()
+        }
+    }
+    private let contextLock = NSLock()
+    private var personalContextServerStorage: PersonalContextServer?
 
     public init(transport: any Transport, model: HarnessSessionModel) {
         self.transport = transport
@@ -131,8 +150,32 @@ public final class HarnessClient: @unchecked Sendable {
                 }
                 self?.onMessage?(message)
             }
+            // Personal-context tool calls execute off the receive pump: the
+            // pump re-arms only after this handler returns (arrival order),
+            // so awaiting a slow provider (contacts enumerate, photos scan)
+            // here would stall every later frame — including `audio.chunk`.
+            if case .toolCall(_, let name, _) = message,
+               name.hasPrefix(PersonalContextServer.toolNamePrefix),
+               let server = self?.personalContextServer {
+                let transport = self?.transport
+                Task.detached { [weak server] in
+                    guard let server else { return }
+                    await server.handle(message) { reply in
+                        guard let transport else { return }
+                        try? await transport.send(reply.encode())
+                    }
+                }
+            }
         }
         try await transport.send(ClientMessage.sessionStart(deviceId: deviceId, sampleRate: 16000).encode())
+    }
+
+    /// Builds and sends a `context.announce` frame. An empty `providers`
+    /// list is valid: it clears the server-side catalog (the disable path).
+    /// Throws when the connection is down; callers decide whether an announce
+    /// failure matters (the turn loop just won't see the tools).
+    public func sendAnnounce(providers: [ProviderDescriptor]) async throws {
+        try await transport.send(ClientMessage.contextAnnounce(providers: providers).encode())
     }
 
     /// Called by the runtime when queued playback has drained (the drain

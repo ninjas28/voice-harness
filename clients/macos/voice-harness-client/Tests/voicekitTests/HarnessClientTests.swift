@@ -175,4 +175,80 @@ final class HarnessClientTests: XCTestCase {
         let standalone = MicCapture()
         XCTAssertFalse(standalone.engine === player.engine)
     }
+
+    // MARK: - Personal context (Task 9)
+
+    /// Fixed-digest provider double: execute output embeds the inputs
+    /// ("EXEC:<name>:<args>") so assertions verify what actually routed.
+    private struct StubPersonalProvider: PersonalContextProvider {
+        let id: String
+        let descriptor: ProviderDescriptor?
+
+        var providerId: String { id }
+        func currentDescriptor() async -> ProviderDescriptor? { descriptor }
+
+        func execute(name: String, argumentsJSON: String) async throws -> String {
+            "EXEC:\(name):\(argumentsJSON)"
+        }
+    }
+
+    /// After `start`, an installed personalContextServer answers a
+    /// `tool.call` with a `tool.result` written to the transport.
+    func testToolCallRoutesThroughPersonalContextServer() async throws {
+        let (client, stub, _) = makeClient()
+        try await client.start(deviceId: nil)
+        client.personalContextServer = PersonalContextServer(providers: [
+            StubPersonalProvider(id: "calendar",
+                                 descriptor: .init(id: "calendar", tools: [
+                                    .init(name: "events", description: "List events.",
+                                          parameters: ["type": .string("object")]),
+                                 ])),
+        ])
+        await stub.simulateIncoming(
+            #"{"type":"tool.call","call_id":11,"name":"personal.calendar.events","arguments":"{}"}"#)
+        // The tool.result is written from a detached task off the receive
+        // pump — poll for it, bounded (house rule: never an unbounded wait).
+        let deadline = Date().addingTimeInterval(2)
+        var results: [String] = []
+        while Date() < deadline {
+            let sent = await stub.sent
+            results = sent.filter { $0.contains(#""type":"tool.result""#) }
+            if !results.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(results.count, 1, "expected exactly one tool.result")
+        if results.count == 1 {
+            XCTAssertTrue(results[0].contains(#""call_id":11"#), "frame was: \(results[0])")
+            XCTAssertTrue(results[0].contains(#""ok":true"#), "frame was: \(results[0])")
+            XCTAssertTrue(results[0].contains("EXEC:events:{}"), "frame was: \(results[0])")
+        }
+        await client.stop()
+    }
+
+    /// The announce helper encodes through the transport unmodified.
+    func testSendAnnounceEncodesContextAnnounce() async throws {
+        let (client, stub, _) = makeClient()
+        try await client.start(deviceId: nil)
+        let descriptor = ProviderDescriptor(id: "calendar", tools: [
+            .init(name: "events", description: "List events.",
+                  parameters: ["type": .string("object")]),
+        ])
+        try await client.sendAnnounce(providers: [descriptor])
+        let sent = await stub.sent
+        XCTAssertTrue(sent.last?.contains(#""type":"context.announce""#) ?? false,
+                      "last frame was: \(sent.last ?? "nil")")
+        XCTAssertTrue(sent.last?.contains(#""id":"calendar""#) ?? false)
+        await client.stop()
+    }
+
+    /// An empty announce still encodes and sends (clears the server catalog).
+    func testSendAnnounceSendsEmptyProviderList() async throws {
+        let (client, stub, _) = makeClient()
+        try await client.start(deviceId: nil)
+        try await client.sendAnnounce(providers: [])
+        let sent = await stub.sent
+        XCTAssertEqual(sent.last,
+                       #"{"type":"context.announce","providers":[]}"#)
+        await client.stop()
+    }
 }

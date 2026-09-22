@@ -5,9 +5,11 @@ import Foundation
 /// Authorization is lazy — the TCC prompt happens only when `authorize()` is
 /// called (or a tool runs); never at session start. An actor so the shared
 /// `EKEventStore` is isolated and the Sendable conformance is sound.
-actor EventKitProvider: PersonalContextProvider {
-    let providerId = "calendar"
+public actor EventKitProvider: PersonalContextProvider {
+    public let providerId = "calendar"
     private let store = EKEventStore()
+
+    public init() {}
 
     static func descriptor() -> ProviderDescriptor {
         ProviderDescriptor(id: "calendar", tools: [
@@ -54,11 +56,11 @@ actor EventKitProvider: PersonalContextProvider {
         ])
     }
 
-    func currentDescriptor() async -> ProviderDescriptor? {
+    public func currentDescriptor() async -> ProviderDescriptor? {
         await authorize() ? Self.descriptor() : nil
     }
 
-    func execute(name: String, argumentsJSON: String) async throws -> String {
+    public func execute(name: String, argumentsJSON: String) async throws -> String {
         guard await authorize() else { throw PersonalContextError.notAuthorized("calendar") }
         let args = try PersonalContextArguments.parse(argumentsJSON)
         switch name {

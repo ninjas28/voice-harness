@@ -8,14 +8,7 @@ let package = Package(
         .library(name: "voicekit", targets: ["voicekit"])
     ],
     targets: [
-        .target(
-            name: "voicekit",
-            exclude: [
-                "PersonalContext/EventKitProvider.swift",
-                "PersonalContext/ContactsProvider.swift",
-                "PersonalContext/PhotosProvider.swift",
-            ]
-        ),
+        .target(name: "voicekit"),
         .executableTarget(
             name: "VoiceHarnessClient",
             dependencies: ["voicekit"],

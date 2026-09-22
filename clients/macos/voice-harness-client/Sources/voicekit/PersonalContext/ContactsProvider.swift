@@ -4,9 +4,11 @@ import Contacts
 /// Personal-context provider over the Contacts store: name search with
 /// case-insensitive substring matching. Authorization is lazy (TCC). An actor
 /// so the shared `CNContactStore` is isolated and Sendable is sound.
-actor ContactsProvider: PersonalContextProvider {
-    let providerId = "contacts"
+public actor ContactsProvider: PersonalContextProvider {
+    public let providerId = "contacts"
     private let store = CNContactStore()
+
+    public init() {}
 
     static func descriptor() -> ProviderDescriptor {
         ProviderDescriptor(id: "contacts", tools: [
@@ -31,11 +33,11 @@ actor ContactsProvider: PersonalContextProvider {
         ])
     }
 
-    func currentDescriptor() async -> ProviderDescriptor? {
+    public func currentDescriptor() async -> ProviderDescriptor? {
         await authorize() ? Self.descriptor() : nil
     }
 
-    func execute(name: String, argumentsJSON: String) async throws -> String {
+    public func execute(name: String, argumentsJSON: String) async throws -> String {
         guard await authorize() else { throw PersonalContextError.notAuthorized("contacts") }
         guard name == "search" else {
             throw PersonalContextError.failed("unknown contacts tool '\(name)'")

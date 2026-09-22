@@ -90,6 +90,15 @@ struct PanelView: View {
             SecureField("empty = no auth", text: $runtime.apiKeyString)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(saveURL)
+            // Personal context: on = request calendar/contacts/photos access
+            // (the one deliberate TCC prompt) and announce the authorized
+            // tools to the server; off = announce an empty list, which clears
+            // the server-side catalog.
+            Toggle("Personal context (calendar, contacts, photos)",
+                   isOn: Binding(
+                       get: { runtime.personalContextEnabled },
+                       set: { runtime.setPersonalContextEnabled($0) }))
+                .font(.caption)
             if let settingsError {
                 Text(settingsError).font(.caption).foregroundStyle(.red)
             }

@@ -58,13 +58,20 @@ public actor PersonalContextServer {
     /// providers. An empty providers list is valid: it clears the server-side
     /// catalog (used when the user disables personal context).
     public func announceMessage() async -> ClientMessage {
+        .contextAnnounce(providers: await announceProviders())
+    }
+
+    /// Descriptors of the currently-authorized providers — the payload of
+    /// `context.announce`. Calling this is also what triggers each provider's
+    /// lazy authorization (TCC), so runtimes use it to pre-grant access.
+    public func announceProviders() async -> [ProviderDescriptor] {
         var descriptors: [ProviderDescriptor] = []
         for provider in providers {
             if let descriptor = await provider.currentDescriptor() {
                 descriptors.append(descriptor)
             }
         }
-        return .contextAnnounce(providers: descriptors)
+        return descriptors
     }
 
     private func sendUnknownTool(_ callId: Int, _ name: String,

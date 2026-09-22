@@ -35,6 +35,14 @@ targets:
         UILaunchScreen: {}
         UIBackgroundModes: [audio]
         NSMicrophoneUsageDescription: "Voice Harness streams your microphone to your own voice assistant server."
+        # Personal-context tools (Task 9): calendar/reminders via EventKit,
+        # contacts via Contacts, photo statistics via PhotoKit. Requests
+        # without these keys crash on iOS; extra keys are harmless.
+        NSContactsUsageDescription: "Voice Harness can look up contact details when you ask about people."
+        NSCalendarsUsageDescription: "Voice Harness can read your calendar events when you ask about your schedule."
+        NSCalendarsFullAccessUsageDescription: "Voice Harness can read your calendar events when you ask about your schedule."
+        NSRemindersFullAccessUsageDescription: "Voice Harness can read your reminders when you ask about them."
+        NSPhotoLibraryUsageDescription: "Voice Harness can summarize your photo library (counts and dates only — never photo content)."
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
   VoiceHarnessWidgets:

@@ -121,6 +121,21 @@ public enum AppSettings {
         }
     }
 
+    // MARK: - Personal context toggle
+
+    /// Master switch for client-executed personal-context tools (calendar,
+    /// contacts, photos). Default off: enabling it is the one deliberate TCC
+    /// prompt, so users who never opt in get zero authorization requests.
+    public static let personalContextEnabledKey = "personal_context_enabled"
+
+    public static var personalContextEnabled: Bool {
+        defaults.bool(forKey: personalContextEnabledKey)
+    }
+
+    public static func setPersonalContextEnabled(_ value: Bool) {
+        defaults.set(value, forKey: personalContextEnabledKey)
+    }
+
     // MARK: - TTS playback rate
 
     public static let ttsRateKey = "tts_rate"

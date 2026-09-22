@@ -31,6 +31,10 @@ final class AppRuntime: ObservableObject {
     /// Editable API key for the settings field. Persisted via `AppSettings`
     /// and committed together with the URL (both need a reconnect to apply).
     @Published var apiKeyString: String = AppSettings.apiKey
+    /// Whether personal-context tools (calendar, contacts, photos) are
+    /// enabled. Persisted; flipped only through `setPersonalContextEnabled`,
+    /// which owns the authorization + announce side effects.
+    @Published private(set) var personalContextEnabled = AppSettings.personalContextEnabled
 
     /// The wire→UI state machine; single source of truth, mirrored above.
     let model = HarnessSessionModel()
@@ -42,6 +46,12 @@ final class AppRuntime: ObservableObject {
     /// Set when `turn.completed` arrived while audio was still pending.
     private var turnCompletedPending = false
     private var cancellables = Set<AnyCancellable>()
+    /// Personal-context tool server (calendar + contacts + photos providers),
+    /// built lazily — only once the user enables the feature — so opt-out
+    /// users get zero TCC prompts and the provider objects are never even
+    /// constructed. Cached: authorization is sticky, so one instance serves
+    /// every session.
+    private var personalContextServer: PersonalContextServer?
 
     private init() {
         // @Published projections emit *after* mutation — safe to mirror here.
@@ -94,11 +104,26 @@ final class AppRuntime: ObservableObject {
         player.rate = playbackRate
         let transport = URLSessionTransport(url: serverURL, apiKey: AppSettings.apiKey)
         let client = HarnessClient(transport: transport, model: model)
+        // Personal-context tools ride this session when enabled: the client
+        // routes incoming `personal.*` tool calls to the server, which answers
+        // via the same transport. Fresh session ⇒ fresh announce right after
+        // `session.start` (the server resets its per-session catalog there).
+        if AppSettings.personalContextEnabled {
+            client.personalContextServer = getOrBuildPersonalContextServer()
+        }
         do {
             try await client.start(deviceId: deviceName())
         } catch {
             errorMessage = "Can't reach harness server at \(serverURL.host ?? "?"): \(error.localizedDescription)"
             return
+        }
+        if AppSettings.personalContextEnabled, let server = client.personalContextServer {
+            do {
+                try await client.sendAnnounce(providers: await server.announceProviders())
+            } catch {
+                // Non-fatal: the session still works, just without personal
+                // tools until the next announce (toggle flip or reconnect).
+            }
         }
         client.onChunk = { [weak player] base64, _ in
             player?.scheduleChunk(base64: base64)
@@ -137,6 +162,46 @@ final class AppRuntime: ObservableObject {
         turnCompletedPending = false
         running = true
         drainTask = Task { [weak self] in await self?.drainWatcher() }
+    }
+
+    /// Enables/disables the personal-context tools (calendar, contacts,
+    /// photos). Enabling is the one deliberate TCC moment: requests access for
+    /// all three providers up front, then announces the authorized set on the
+    /// live session (or defers to the next `start` when offline). Disabling
+    /// announces an empty provider list to clear the server-side catalog.
+    func setPersonalContextEnabled(_ enabled: Bool) {
+        AppSettings.setPersonalContextEnabled(enabled)
+        personalContextEnabled = enabled
+        guard enabled else {
+            // Clear the catalog server-side; stop routing tool calls.
+            if let client {
+                Task { try? await client.sendAnnounce(providers: []) }
+            }
+            return
+        }
+        // Building the server and asking for descriptors fires the TCC
+        // prompts (first time) — off the button tap so the panel stays live.
+        Task { [weak self] in
+            guard let self else { return }
+            let server = self.getOrBuildPersonalContextServer()
+            let descriptors = await server.announceProviders()
+            guard self.personalContextEnabled else { return } // toggled off mid-prompt
+            if let client = self.client {
+                try? await client.sendAnnounce(providers: descriptors)
+            }
+        }
+    }
+
+    /// Lazily constructs the personal-context server (one instance, cached).
+    private func getOrBuildPersonalContextServer() -> PersonalContextServer {
+        if let personalContextServer { return personalContextServer }
+        let server = PersonalContextServer(providers: [
+            EventKitProvider(),
+            ContactsProvider(),
+            PhotosProvider(),
+        ])
+        personalContextServer = server
+        return server
     }
 
     func stop() {
