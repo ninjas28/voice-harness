@@ -18,6 +18,10 @@ pub struct Config {
     pub prompts: PromptsConfig,
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// `[personal_context]`: client-side personal-context tools (calendar,
+    /// contacts, photos) executed on the connected macOS/iOS client.
+    #[serde(default)]
+    pub personal_context: PersonalContextConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -217,6 +221,41 @@ fn default_sentence_end_wait_ms() -> u64 {
     2_000
 }
 
+/// `[personal_context]`: client-side personal-context tools (calendar,
+/// contacts, photos) executed on the connected macOS/iOS client.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersonalContextConfig {
+    /// Master gate: false = no specs advertised, calls error immediately.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Per client tool call wait bound before an error digest is returned.
+    #[serde(default = "default_call_timeout")]
+    pub call_timeout_secs: u64,
+    /// Server-side clamp on digest text length before it enters history.
+    #[serde(default = "default_max_result_bytes")]
+    pub max_result_bytes: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_call_timeout() -> u64 {
+    10
+}
+fn default_max_result_bytes() -> usize {
+    8_192
+}
+
+impl Default for PersonalContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            call_timeout_secs: default_call_timeout(),
+            max_result_bytes: default_max_result_bytes(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PromptsConfig {
     #[serde(default = "default_system_prompt")]
@@ -396,6 +435,7 @@ impl Default for Config {
                 weather: Default::default(),
                 mcp: Default::default(),
             },
+            personal_context: PersonalContextConfig::default(),
         }
     }
 }
@@ -749,6 +789,28 @@ allowed_origins = ["https://home.example.com"]
         assert_eq!(cfg.stt.realtime.path, "/v1/audio/transcriptions/realtime");
         assert_eq!(cfg.stt.realtime.endpointing_ms, 700);
         assert_eq!(cfg.stt.realtime.language, "");
+    }
+
+    #[test]
+    fn personal_context_defaults() {
+        let cfg = Config::load(None).expect("defaults load");
+        assert!(cfg.personal_context.enabled);
+        assert_eq!(cfg.personal_context.call_timeout_secs, 10);
+        assert_eq!(cfg.personal_context.max_result_bytes, 8_192);
+    }
+
+    #[test]
+    fn personal_context_parses_from_toml() {
+        let path = std::env::temp_dir().join(format!("vh-pc-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "[personal_context]\nenabled = false\ncall_timeout_secs = 5\nmax_result_bytes = 4096\n",
+        )
+        .expect("write temp config");
+        let cfg = Config::load(Some(&path)).expect("parses");
+        assert!(!cfg.personal_context.enabled);
+        assert_eq!(cfg.personal_context.call_timeout_secs, 5);
+        assert_eq!(cfg.personal_context.max_result_bytes, 4_096);
     }
 
     #[test]

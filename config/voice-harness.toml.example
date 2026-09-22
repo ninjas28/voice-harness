@@ -102,3 +102,12 @@ enabled = ["time", "web_search", "weather"]
 #   for large servers (ha-mcp advertises 77) where the full tool-spec list would
 #   bloat every LLM request, and for keeping config-editing tools (restart,
 #   backups, dashboard edits) out of a voice assistant's reach.
+
+# Client-executed personal-context tools (calendar, contacts, photos). The
+# connected macOS/iOS client announces its provider catalog over the WebSocket;
+# the server exposes those tools to the LLM as personal.<provider>.<tool> and
+# forwards calls to the announcing client.
+[personal_context]
+enabled = true                       # master gate: false = no specs advertised, calls error immediately
+call_timeout_secs = 10               # per client tool call wait bound before an error digest is returned
+max_result_bytes = 8192              # server-side clamp on digest text length before it enters history
