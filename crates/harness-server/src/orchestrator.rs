@@ -25,6 +25,94 @@ const MAX_TOOL_ROUNDS: usize = 8;
 /// `None` on surfaces without a client (HTTP `POST /v1/turn`).
 pub type ToolInbox = mpsc::Receiver<(u64, bool, String)>;
 
+/// Namespaced prefix marking a tool call as client-executed. No builtin
+/// plugin uses this namespace, so routing is collision-free.
+const PERSONAL_PREFIX: &str = "personal.";
+
+/// One static hint line appended to the system prompt when the session has an
+/// announced client catalog, so the model knows what `personal.*` is for.
+const PROMPT_HINT: &str = "Personal-context tools (personal.*) return a plain-text digest of the user's calendar, reminders, contacts, or photos from their device. Call them when asked about their schedule, people, or photos.";
+
+/// Classify a `personal.*` tool call: `Some(Execute)` = forward to the client;
+/// `Some(Unavailable(why))` = answer with an error digest the LLM can recover
+/// from; `None` = not a client call (route to server plugins as usual).
+enum ClientRoute {
+    Execute,
+    Unavailable(&'static str),
+}
+
+fn classify_client_call(
+    cfg: &Config,
+    session: &crate::state::Session,
+    name: &str,
+) -> Option<ClientRoute> {
+    if !name.starts_with(PERSONAL_PREFIX) {
+        return None;
+    }
+    if !cfg.personal_context.enabled {
+        return Some(ClientRoute::Unavailable(
+            "personal context is disabled on the server",
+        ));
+    }
+    if session.context.resolve(name).is_none() {
+        return Some(ClientRoute::Unavailable("unknown personal-context tool"));
+    }
+    Some(ClientRoute::Execute)
+}
+
+/// Forward one tool call to the announcing client and wait, bounded, for its
+/// digest. Results for other call ids (stale/late) are skipped; a closed
+/// inbox means the client connection ended. Digests are clamped to
+/// `max_bytes` before they enter history.
+async fn client_tool_dispatch(
+    events: &mpsc::Sender<ServerMsg>,
+    inbox: &mut ToolInbox,
+    call_id: u64,
+    name: &str,
+    arguments: &str,
+    timeout: std::time::Duration,
+    max_bytes: usize,
+) -> Result<String, String> {
+    events
+        .send(ServerMsg::ToolCall {
+            call_id,
+            name: name.into(),
+            arguments: arguments.into(),
+        })
+        .await
+        .map_err(|_| "client connection closed".to_string())?;
+    let res = tokio::time::timeout(timeout, async {
+        loop {
+            match inbox.recv().await {
+                Some((id, ok, text)) if id == call_id => return Some((ok, text)),
+                Some(_) => continue, // result for another call: skip
+                None => return None, // inbox closed: client connection gone
+            }
+        }
+    })
+    .await;
+    match res {
+        Ok(Some((true, text))) => Ok(clamp_digest(text, max_bytes)),
+        Ok(Some((false, text))) => Err(clamp_digest(text, max_bytes)),
+        Ok(None) => Err("client connection closed".into()),
+        Err(_) => Err(format!("client did not answer '{name}' within the timeout")),
+    }
+}
+
+/// Clamp a digest to `max_bytes` with a spoken-style truncation marker. Never
+/// panics: the cut point walks back to a UTF-8 char boundary first.
+fn clamp_digest(mut text: String, max_bytes: usize) -> String {
+    if text.len() > max_bytes {
+        let mut end = max_bytes;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(" …(truncated)");
+    }
+    text
+}
+
 /// Injected provider set driving a turn. Trait objects throughout so tests can
 /// drive mocks (and `main.rs` wires the real clients).
 pub struct Deps {
@@ -66,20 +154,32 @@ fn utc_now_string() -> String {
     )
 }
 
-/// Build the outgoing chat request: system prompt (with current date/time)
-/// prepended to `messages` (history + new user message), plus tool specs.
-fn build_request(deps: &Deps, messages: &[ChatMessage]) -> ChatRequest {
-    let system = format!(
+/// Build the outgoing chat request: system prompt (with current date/time,
+/// plus the personal-context hint when the session announced a client
+/// catalog) prepended to `messages` (history + new user message), plus tool
+/// specs (server plugins + announced client tools).
+fn build_request(
+    deps: &Deps,
+    session: &crate::state::Session,
+    messages: &[ChatMessage],
+) -> ChatRequest {
+    let mut system = format!(
         "{}\nCurrent date/time: {}",
         deps.config.prompts.system,
         utc_now_string()
     );
+    let mut specs = deps.plugins.tool_specs();
+    if !session.context.is_empty() {
+        system.push('\n');
+        system.push_str(PROMPT_HINT);
+        specs.extend(session.context.openai_tool_specs());
+    }
     let mut full = vec![ChatMessage::text("system", system)];
     full.extend(messages.iter().cloned());
     ChatRequest {
         model: deps.config.llm.model.clone(),
         messages: full,
-        tools: Some(deps.plugins.tool_specs()),
+        tools: Some(specs),
         reasoning_effort: (!deps.config.llm.reasoning_effort.trim().is_empty())
             .then(|| deps.config.llm.reasoning_effort.clone()),
     }
@@ -213,7 +313,7 @@ async fn execute_turn(
     session: &mut crate::state::Session,
     user_text: &str,
     events: mpsc::Sender<ServerMsg>,
-    _inbox: Option<&mut ToolInbox>,
+    mut inbox: Option<&mut ToolInbox>,
 ) -> Result<(), HarnessError> {
     session
         .history
@@ -224,7 +324,7 @@ async fn execute_turn(
     let mut final_text = String::new();
 
     for round in 0..MAX_TOOL_ROUNDS {
-        let req = build_request(deps, &messages_for_round(&history, &extra));
+        let req = build_request(deps, session, &messages_for_round(&history, &extra));
         let mut seq = 0u32;
         let (tool_calls, text) = run_llm_round(deps, req, &events, &mut seq).await?;
         final_text = text;
@@ -236,6 +336,9 @@ async fn execute_turn(
         // Dispatch every tool call; failures become error payloads the LLM can
         // read and recover from, never an abort. Each dispatch is bracketed by
         // `state.thinking` frames so clients can show tool activity.
+        // `personal.*` calls bypass the plugin registry: they execute on the
+        // announcing client over the WS, answered via the per-turn inbox.
+        let mut next_client_call_id = 1u64;
         let mut results: Vec<(String, String)> = Vec::new();
         for (id, name, arguments) in &tool_calls {
             let _ = events
@@ -243,18 +346,43 @@ async fn execute_turn(
                     detail: ThinkingDetail::CallingTools,
                 })
                 .await;
-            let outcome = deps
-                .plugins
-                .dispatch(name, parse_tool_args(arguments))
-                .await;
+            let outcome = match classify_client_call(&deps.config, session, name) {
+                None => deps
+                    .plugins
+                    .dispatch(name, parse_tool_args(arguments))
+                    .await
+                    .map(|v| {
+                        serde_json::to_string(&v)
+                            .unwrap_or_else(|_| "{\"error\":\"unserializable tool result\"}".into())
+                    }),
+                Some(ClientRoute::Unavailable(why)) => Err(why.to_string()),
+                Some(ClientRoute::Execute) => match inbox.as_mut() {
+                    Some(rx) => {
+                        let call_id = next_client_call_id;
+                        next_client_call_id += 1;
+                        client_tool_dispatch(
+                            &events,
+                            rx,
+                            call_id,
+                            name,
+                            arguments,
+                            std::time::Duration::from_secs(
+                                deps.config.personal_context.call_timeout_secs,
+                            ),
+                            deps.config.personal_context.max_result_bytes,
+                        )
+                        .await
+                    }
+                    None => Err("personal context requires a connected client".into()),
+                },
+            };
             let _ = events
                 .send(ServerMsg::StateThinking {
                     detail: ThinkingDetail::Thinking,
                 })
                 .await;
             let payload = match outcome {
-                Ok(value) => serde_json::to_string(&value)
-                    .unwrap_or_else(|_| "{\"error\":\"unserializable tool result\"}".into()),
+                Ok(text) => text, // already the string content the LLM reads
                 Err(err) => serde_json::json!({ "error": err }).to_string(),
             };
             results.push((id.clone(), payload));

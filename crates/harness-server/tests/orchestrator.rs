@@ -172,6 +172,60 @@ fn deps_with(
     }
 }
 
+// ------------------------------------------------------------ personal tools
+
+use harness_core::types::{ProviderDescriptor, ToolDescriptor};
+use harness_server::client_tools::ClientCatalog;
+
+/// Catalog matching the announced calendar provider (bare tool names).
+fn calendar_catalog() -> ClientCatalog {
+    ClientCatalog::from_announce(vec![ProviderDescriptor {
+        id: "calendar".into(),
+        tools: vec![ToolDescriptor {
+            name: "events".into(),
+            description: "List events.".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }],
+    }])
+}
+
+/// Mock LLM script: round 1 demands `personal.calendar.events`, round 2
+/// answers with text (expected to quote what the tool returned).
+fn personal_call_script() -> Vec<Vec<LlmEvent>> {
+    vec![
+        vec![
+            LlmEvent::ToolCall {
+                id: "call_1".into(),
+                name: "personal.calendar.events".into(),
+                arguments: "{}".into(),
+            },
+            LlmEvent::Done {
+                finish_reason: Some("tool_calls".into()),
+            },
+        ],
+        vec![
+            LlmEvent::Delta("Here is your schedule.".into()),
+            LlmEvent::Done {
+                finish_reason: Some("stop".into()),
+            },
+        ],
+    ]
+}
+
+/// Deps with a personal-context config knob applied.
+fn deps_with_cfg(llm: Arc<dyn LlmProvider>, cfg: Config) -> Deps {
+    Deps {
+        config: cfg,
+        llm,
+        tts: Arc::new(MockTts::new()),
+        stt: Arc::new(MockStt {
+            text: String::new(),
+            calls: AtomicUsize::new(0),
+        }),
+        plugins: Arc::new(PluginRegistry::new()),
+    }
+}
+
 /// Drain the event channel until it closes (timeout guard per receive), so
 /// tests never hang and don't have to guess the event count.
 async fn collect_events_all(mut rx: mpsc::Receiver<ServerMsg>) -> Vec<ServerMsg> {
@@ -738,5 +792,264 @@ async fn llm_reasoning_effort_flows_from_config_into_every_request() {
         llm2.requests()[0].reasoning_effort,
         None,
         "default config must not set reasoning_effort"
+    );
+}
+
+// ------------------------------------------------------- personal.* dispatch
+
+#[tokio::test]
+async fn personal_tool_result_reaches_next_llm_round() {
+    let llm = Arc::new(MockLlm::new(personal_call_script()));
+    let deps = deps_with_cfg(llm.clone(), Config::default());
+    let mut session = Session {
+        context: calendar_catalog(),
+        ..Default::default()
+    };
+
+    let (inbox_tx, mut inbox_rx) = mpsc::channel(4);
+    let (tx, rx) = mpsc::channel(64);
+    // Reply arrives before the orchestrator even waits: buffered, still
+    // matched by call_id. Exercises the buffer-not-race path deterministically.
+    inbox_tx
+        .send((1, true, "Thursday: Dentist at 9:30".into()))
+        .await
+        .unwrap();
+    // The inbox sender must stay open until the turn is done (a dropped
+    // sender would close the inbox and look like "client connection closed").
+    let _inbox_keepalive = inbox_tx;
+
+    run_text_turn(
+        &deps,
+        &mut session,
+        "what's on my calendar",
+        tx,
+        Some(&mut inbox_rx),
+    )
+    .await
+    .expect("turn completes");
+    let _ = collect_events_all(rx).await;
+
+    // Second LLM request carries the digest as the tool message content.
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 2, "tool call forces a second LLM round");
+    let tool_msg = reqs[1]
+        .messages
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("tool message present");
+    assert!(
+        tool_msg
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Dentist at 9:30"),
+        "client digest reaches the LLM: {:?}",
+        tool_msg.content
+    );
+}
+
+#[tokio::test]
+async fn personal_tool_timeout_yields_error_digest() {
+    let llm = Arc::new(MockLlm::new(personal_call_script()));
+    let mut cfg = Config::default();
+    cfg.personal_context.call_timeout_secs = 1;
+    let deps = deps_with_cfg(llm.clone(), cfg);
+    let mut session = Session {
+        context: calendar_catalog(),
+        ..Default::default()
+    };
+
+    let (_inbox_tx, mut inbox_rx) = mpsc::channel(4);
+    let _inbox_keepalive = _inbox_tx; // inbox stays open: nobody replies
+    let (tx, rx) = mpsc::channel(64);
+
+    run_text_turn(
+        &deps,
+        &mut session,
+        "what's on my calendar",
+        tx,
+        Some(&mut inbox_rx),
+    )
+    .await
+    .expect("turn completes");
+    let _ = collect_events_all(rx).await;
+
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 2, "timeout still yields a recoverable round");
+    let tool_msg = reqs[1]
+        .messages
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("tool message present");
+    assert!(
+        tool_msg
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("did not answer"),
+        "timeout error digest fed to LLM: {:?}",
+        tool_msg.content
+    );
+}
+
+#[tokio::test]
+async fn personal_tool_without_inbox_errors_cleanly() {
+    let llm = Arc::new(MockLlm::new(personal_call_script()));
+    let deps = deps_with_cfg(llm.clone(), Config::default());
+    let mut session = Session {
+        context: calendar_catalog(),
+        ..Default::default()
+    };
+
+    let (tx, rx) = mpsc::channel(64);
+    // inbox = None: the HTTP surface (no connected client).
+    run_text_turn(&deps, &mut session, "what's on my calendar", tx, None)
+        .await
+        .expect("turn completes");
+    let _ = collect_events_all(rx).await;
+
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 2);
+    let tool_msg = reqs[1]
+        .messages
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("tool message present");
+    assert!(
+        tool_msg
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("requires a connected client"),
+        "no-inbox error digest fed to LLM: {:?}",
+        tool_msg.content
+    );
+}
+
+#[tokio::test]
+async fn personal_tool_disabled_by_config_errors() {
+    let llm = Arc::new(MockLlm::new(personal_call_script()));
+    let mut cfg = Config::default();
+    cfg.personal_context.enabled = false;
+    let deps = deps_with_cfg(llm.clone(), cfg);
+    let mut session = Session {
+        context: calendar_catalog(),
+        ..Default::default()
+    };
+
+    let (_inbox_tx, mut inbox_rx) = mpsc::channel(4);
+    let _inbox_keepalive = _inbox_tx;
+    let (tx, rx) = mpsc::channel(64);
+
+    run_text_turn(
+        &deps,
+        &mut session,
+        "what's on my calendar",
+        tx,
+        Some(&mut inbox_rx),
+    )
+    .await
+    .expect("turn completes");
+    let _ = collect_events_all(rx).await;
+
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 2);
+    let tool_msg = reqs[1]
+        .messages
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("tool message present");
+    assert!(
+        tool_msg
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("disabled"),
+        "disabled error digest fed to LLM: {:?}",
+        tool_msg.content
+    );
+}
+
+#[tokio::test]
+async fn oversized_digest_is_clamped() {
+    let llm = Arc::new(MockLlm::new(personal_call_script()));
+    let mut cfg = Config::default();
+    cfg.personal_context.max_result_bytes = 512;
+    let deps = deps_with_cfg(llm.clone(), cfg);
+    let mut session = Session {
+        context: calendar_catalog(),
+        ..Default::default()
+    };
+
+    let (inbox_tx, mut inbox_rx) = mpsc::channel(4);
+    // 20 000 characters of digest.
+    let huge = "x".repeat(20_000);
+    inbox_tx.send((1, true, huge)).await.expect("inbox open");
+    let _inbox_keepalive = inbox_tx;
+    let (tx, rx) = mpsc::channel(64);
+
+    run_text_turn(
+        &deps,
+        &mut session,
+        "what's on my calendar",
+        tx,
+        Some(&mut inbox_rx),
+    )
+    .await
+    .expect("turn completes");
+    let _ = collect_events_all(rx).await;
+
+    let reqs = llm.requests();
+    let tool_msg = reqs[1]
+        .messages
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("tool message present");
+    let content = tool_msg.content.as_deref().unwrap_or_default();
+    assert!(
+        content.len() <= 512 + " …(truncated)".len(),
+        "digest clamped to the configured bound, got {} bytes",
+        content.len()
+    );
+    assert!(
+        content.ends_with("…(truncated)"),
+        "truncation marker present: {content:?}"
+    );
+}
+
+#[tokio::test]
+async fn prompt_hint_appended_when_catalog_present() {
+    let llm = Arc::new(MockLlm::new(two_sentence_script()));
+    let deps = deps_with_cfg(llm.clone(), Config::default());
+    let mut session = Session {
+        context: calendar_catalog(),
+        ..Default::default()
+    };
+
+    let (tx, rx) = mpsc::channel(64);
+    run_text_turn(&deps, &mut session, "hi", tx, None)
+        .await
+        .expect("turn completes");
+    let _ = collect_events_all(rx).await;
+
+    let sys = llm.requests()[0].messages[0].content.clone().unwrap();
+    assert!(
+        sys.contains("Personal-context tools"),
+        "hint appended when a catalog exists: {sys}"
+    );
+
+    // Empty catalog → no hint.
+    let llm2 = Arc::new(MockLlm::new(two_sentence_script()));
+    let deps2 = deps_with_cfg(llm2.clone(), Config::default());
+    let mut session2 = Session::default();
+    let (tx2, rx2) = mpsc::channel(64);
+    run_text_turn(&deps2, &mut session2, "hi", tx2, None)
+        .await
+        .expect("turn completes");
+    let _ = collect_events_all(rx2).await;
+    let sys2 = llm2.requests()[0].messages[0].content.clone().unwrap();
+    assert!(
+        !sys2.contains("Personal-context tools"),
+        "no hint without an announced catalog: {sys2}"
     );
 }
