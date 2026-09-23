@@ -255,6 +255,10 @@ pub async fn spawn_server(
         }),
     };
     let deps = RouterDeps {
+        router: std::sync::Arc::new(harness_server::state::FederationRouter::new()),
+        identities: std::sync::Arc::new(tokio::sync::RwLock::new(
+            harness_server::identity::IdentityRegistry::default(),
+        )),
         config: config.clone(),
         llm: llm_provider,
         tts: Arc::new(MockTts { url: tts.uri() }),

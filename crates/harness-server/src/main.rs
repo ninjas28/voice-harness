@@ -11,7 +11,10 @@ use harness_providers::stt::OpenAiSttClient;
 use harness_providers::stt_realtime::RealtimeSttClient;
 use harness_providers::tts::OpenAiTtsClient;
 use harness_server::http::{build_router, RouterDeps};
-use harness_server::state::SessionStore;
+use harness_server::identity::IdentityRegistry;
+use harness_server::state::{FederationRouter, SessionStore};
+use std::sync::Arc as StdArc;
+use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() {
@@ -64,8 +67,24 @@ async fn main() {
             &config.stt.realtime.language,
         ))
     });
+    // Persisted identity registry for personal-context federation (chmod 600,
+    // missing file = empty map). Failure to LOAD a configured-but-corrupt file
+    // is fatal: silently starting over would re-register every device.
+    let identities = if config.personal_context.federation.enabled {
+        IdentityRegistry::load(std::path::Path::new(
+            &config.personal_context.federation.registry_path,
+        ))
+        .unwrap_or_else(|e| {
+            eprintln!("failed to load identity registry: {e}");
+            std::process::exit(1);
+        })
+    } else {
+        IdentityRegistry::default()
+    };
     let deps = RouterDeps {
         sessions: Arc::new(SessionStore::new()),
+        router: StdArc::new(FederationRouter::new()),
+        identities: StdArc::new(RwLock::new(identities)),
         llm: Arc::new(OpenAiLlmClient::new(
             &config.llm.base_url,
             &config.llm.chat_path,

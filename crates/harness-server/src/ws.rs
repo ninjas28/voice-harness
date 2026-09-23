@@ -23,8 +23,9 @@ use tokio::sync::mpsc;
 
 use crate::client_tools::ClientCatalog;
 use crate::http::RouterDeps;
+use crate::identity::IdentityRegistry;
 use crate::orchestrator::{run_text_turn, Deps};
-use crate::state::SessionStore;
+use crate::state::{FederationRouter, SessionStore};
 
 /// Write-channel bound per connection. The pipeline's own sends are awaited,
 /// so a full channel applies backpressure rather than dropping events.
@@ -42,6 +43,11 @@ pub struct WsState {
     /// Streaming STT client for the ASR server's realtime transcription WS.
     /// `None` = batch mode (harness-side VAD + WAV upload).
     pub stt_realtime: Option<Arc<harness_providers::stt_realtime::RealtimeSttClient>>,
+    /// Cross-session `personal.*` routes (canonical user → per-connection
+    /// senders), shared with the orchestrator for federated routing.
+    pub router: Arc<FederationRouter>,
+    /// Persisted identity-key → canonical-user map for `session.start`.
+    pub identities: Arc<tokio::sync::RwLock<IdentityRegistry>>,
 }
 
 impl WsState {
@@ -51,6 +57,8 @@ impl WsState {
             config: deps.config.clone(),
             sessions: deps.sessions.clone(),
             stt_realtime: deps.stt_realtime.clone(),
+            router: deps.router.clone(),
+            identities: deps.identities.clone(),
             deps_factory: Arc::new({
                 let deps = deps.clone();
                 move || Deps {
@@ -59,6 +67,9 @@ impl WsState {
                     tts: deps.tts.clone(),
                     stt: deps.stt.clone(),
                     plugins: deps.plugins.clone(),
+                    store: Some(deps.sessions.clone()),
+                    router: Some(deps.router.clone()),
+                    self_session_id: None, // set per turn by dispatch_turn
                 }
             }),
         }
@@ -178,6 +189,11 @@ pub async fn handle_socket(socket: WebSocket, session: WsState) {
     }
 
     conn.abort_turn();
+    // The connection is gone: its session is no longer ACTIVE (no catalog
+    // contribution, no routing target) and its federated route is removed.
+    if let Some(id) = conn.session_id.clone() {
+        conn.deactivate_and_unregister(&id).await;
+    }
     drop(conn);
     drop(out_tx); // writer drains whatever is queued, then exits
     let _ = writer.await;
@@ -205,6 +221,10 @@ struct ConnState {
     config: harness_core::config::Config,
     deps_factory: DepsFactory,
     sessions: Arc<SessionStore>,
+    /// Cross-session routes (shared with the orchestrator via WsState).
+    router: Arc<FederationRouter>,
+    /// Persisted identity-key → canonical-user map (shared via WsState).
+    identities: Arc<tokio::sync::RwLock<IdentityRegistry>>,
     /// Outbound event channel feeding the single writer task.
     out: mpsc::Sender<ServerMsg>,
     /// Server-side VAD + utterance segmentation (one per connection). In
@@ -254,6 +274,8 @@ impl ConnState {
             config: session.config.clone(),
             deps_factory: session.deps_factory.clone(),
             sessions: session.sessions.clone(),
+            router: session.router.clone(),
+            identities: session.identities.clone(),
             out,
             assembler: None,
             session_id: None,
@@ -304,12 +326,37 @@ impl ConnState {
                 // stale (its device has moved on).
                 self.held_transcript.clear();
                 self.hold_deadline = None;
-                // The announced client catalog belongs to the previous
-                // connection too: a fresh `session.start` (including a
-                // reconnect) resets it — the client re-announces.
+                // The announced client catalog + identity belong to the
+                // previous connection too: a fresh `session.start` (including
+                // a reconnect) resets them — the client re-announces.
+                if let Some(id) = self.session_id.clone() {
+                    // The old session is no longer bound to this connection.
+                    self.deactivate_and_unregister(&id).await;
+                    let session = self.sessions.get(id).await;
+                    let mut session = session.write().await;
+                    session.context = ClientCatalog::default();
+                    session.identity_keys = Vec::new();
+                    session.canonical_user = None;
+                }
+                // Identity keys arrive with the announce (resolution happens
+                // there); session.start only marks the session ACTIVE.
                 if let Some(id) = self.session_id.clone() {
                     let session = self.sessions.get(id).await;
-                    session.write().await.context = ClientCatalog::default();
+                    session.write().await.active = true;
+                }
+                // Register this connection as the session's route so sibling
+                // sessions of the same canonical user can route to it.
+                if let Some(id) = self.session_id.clone() {
+                    let canonical = {
+                        let session = self.sessions.get(id.clone()).await;
+                        let guard = session.read().await;
+                        guard.canonical_user.clone()
+                    };
+                    if let Some(canonical) = canonical {
+                        self.router
+                            .register(&canonical, &id, self.out.clone())
+                            .await;
+                    }
                 }
                 // Any per-turn inbox is stale with the aborted turn.
                 self.client_results = None;
@@ -458,6 +505,9 @@ impl ConnState {
                 // down (the pump exits when the command channel closes, the
                 // upstream sees the socket close).
                 self.teardown_upstream();
+                if let Some(id) = self.session_id.clone() {
+                    self.deactivate_and_unregister(&id).await;
+                }
                 self.assembler = None;
                 self.session_id = None;
                 self.held_transcript.clear();
@@ -475,10 +525,33 @@ impl ConnState {
                 identity_keys,
             } => match self.session_id.clone() {
                 Some(id) => {
-                    let session = self.sessions.get(id).await;
+                    let session = self.sessions.get(id.clone()).await;
+                    let canonical = if self.config.personal_context.federation.enabled
+                        && !identity_keys.is_empty()
+                    {
+                        let mut registry = self.identities.write().await;
+                        let user = registry.canonical_user_for(&identity_keys);
+                        let _ = registry.save();
+                        Some(user)
+                    } else {
+                        None
+                    };
                     let mut session = session.write().await;
                     session.context = ClientCatalog::from_announce(providers);
                     session.identity_keys = identity_keys;
+                    let previous = session.canonical_user.clone();
+                    session.canonical_user = canonical.clone();
+                    // Re-register the route under the resolved canonical user.
+                    if previous != canonical {
+                        if let Some(old) = previous {
+                            self.router.unregister(&old, &id).await;
+                        }
+                        if let Some(canonical) = canonical {
+                            self.router
+                                .register(&canonical, &id, self.out.clone())
+                                .await;
+                        }
+                    }
                 }
                 None => {
                     tracing::warn!(
@@ -487,30 +560,54 @@ impl ConnState {
                     );
                 }
             },
-            // A client tool result for an in-flight turn: forward it into the
-            // per-turn inbox the orchestrator is waiting on. No inbox (turn
-            // already finished / timed out / never started) → late result,
-            // warn + drop. Full inbox (capacity 4) → drop the newest so a
-            // flooding client can never backpressure the read loop.
-            ClientMsg::ToolResult { call_id, ok, text } => match self.client_results.clone() {
-                Some(tx) => {
-                    if let Err(e) = tx.try_send((call_id, ok, text)) {
-                        // Full = the orchestrator is not draining fast enough
-                        // (or is stuck): drop the newest. Closed = the turn
-                        // task finished between the clone and this send.
+            // A client tool result: either the answer to a call routed here
+            // from a SIBLING session's turn (the pending-reply registry
+            // matches first), or the answer to this connection's own turn
+            // (forwarded into the per-turn inbox). No match → late result,
+            // warn + drop.
+            ClientMsg::ToolResult { call_id, ok, text } => {
+                if let Some(reply) = self
+                    .router
+                    .take_pending(&self.session_id.clone().unwrap_or_default(), call_id)
+                    .await
+                {
+                    if let Err(e) = reply.try_send((call_id, ok, text.clone())) {
                         let why = match e {
-                            mpsc::error::TrySendError::Full(_) => "turn inbox full",
-                            mpsc::error::TrySendError::Closed(_) => "turn inbox closed",
+                            mpsc::error::TrySendError::Full(_) => "reply inbox full",
+                            mpsc::error::TrySendError::Closed(_) => "reply inbox closed",
                         };
-                        tracing::warn!("tool.result for call {call_id} dropped: {why}");
+                        tracing::warn!("routed tool.result for call {call_id} dropped: {why}");
                     }
+                } else {
+                    Self::forward_own_result(self, call_id, ok, text).await;
                 }
-                None => {
-                    tracing::warn!("late tool.result for call {call_id}: no turn is waiting");
-                }
-            },
+            }
         }
         false
+    }
+
+    /// Forward a tool result into THIS connection's per-turn inbox (the
+    /// own-turn path). No inbox (turn already finished / timed out / never
+    /// started) → late result, warn + drop. Full inbox (capacity 4) → drop
+    /// the newest so a flooding client can never backpressure the read loop.
+    async fn forward_own_result(&mut self, call_id: u64, ok: bool, text: String) {
+        match self.client_results.clone() {
+            Some(tx) => {
+                if let Err(e) = tx.try_send((call_id, ok, text)) {
+                    // Full = the orchestrator is not draining fast enough
+                    // (or is stuck): drop the newest. Closed = the turn
+                    // task finished between the clone and this send.
+                    let why = match e {
+                        mpsc::error::TrySendError::Full(_) => "turn inbox full",
+                        mpsc::error::TrySendError::Closed(_) => "turn inbox closed",
+                    };
+                    tracing::warn!("tool.result for call {call_id} dropped: {why}");
+                }
+            }
+            None => {
+                tracing::warn!("late tool.result for call {call_id}: no turn is waiting");
+            }
+        }
     }
 
     /// Feed one chunk through the assembler; emit State transitions. Client
@@ -645,7 +742,8 @@ impl ConnState {
             tracing::warn!("turn already in flight; dropping dispatch of {text:?}");
             return;
         }
-        let deps = (self.deps_factory)();
+        let mut deps = (self.deps_factory)();
+        deps.self_session_id = self.session_id.clone();
         let out = self.out.clone();
         let session_id = self.session_id.clone().unwrap_or_else(next_session_id);
         let store = self.sessions.clone();
@@ -789,6 +887,21 @@ impl ConnState {
         }
     }
 
+    /// Mark the bound session INACTIVE and drop its federated route. The
+    /// session itself (history, catalog) survives: a reconnect rebinds it.
+    async fn deactivate_and_unregister(&self, id: &str) {
+        let session = self.sessions.get(id).await;
+        let canonical = {
+            let mut session = session.write().await;
+            let canonical = session.canonical_user.clone();
+            session.active = false;
+            canonical
+        };
+        if let Some(canonical) = canonical {
+            self.router.unregister(&canonical, id).await;
+        }
+    }
+
     fn new_assembler(&self) -> UtteranceAssembler<WebrtcVad> {
         let cfg = &self.config.session;
         UtteranceAssembler::new(
@@ -862,9 +975,16 @@ mod tests {
                 tts: Arc::new(DeadTts),
                 stt: Arc::new(DeadStt),
                 plugins: Arc::new(harness_plugins::PluginRegistry::new()),
+                store: None,
+                router: None,
+                self_session_id: None,
             }),
             sessions: Arc::new(SessionStore::new()),
             stt_realtime: None,
+            router: Arc::new(FederationRouter::new()),
+            identities: Arc::new(tokio::sync::RwLock::new(
+                crate::identity::IdentityRegistry::default(),
+            )),
         };
         (ConnState::new(&ws, out_tx), out_rx)
     }
@@ -1064,6 +1184,57 @@ mod tests {
             ids.push(id);
         }
         assert_eq!(ids, vec![0, 1, 2, 3], "overflow result is dropped");
+    }
+
+    #[tokio::test]
+    async fn tool_result_for_a_routed_sibling_call_reaches_the_reply() {
+        // A sibling turn routed a call to THIS connection: the orchestrator
+        // armed a pending reply under this session. The client's tool.result
+        // must flow into that reply channel (not the, here absent, own inbox).
+        let (mut conn, mut rx) = conn();
+        conn.on_text(r#"{"type":"session.start","device_id":"dev-a"}"#)
+            .await;
+        let (reply_tx, mut reply_rx) = mpsc::channel(4);
+        conn.router.arm_pending("dev-a", 42, reply_tx).await;
+        let msg = serde_json::to_string(&ClientMsg::ToolResult {
+            call_id: 42,
+            ok: true,
+            text: "Mom: +1 555 0100".into(),
+        })
+        .unwrap();
+        let end = conn.on_text(&msg).await;
+        assert!(!end, "routed result must not close the connection");
+        let got = tokio::time::timeout(std::time::Duration::from_secs(1), reply_rx.recv())
+            .await
+            .expect("routed reply forwarded within bound");
+        assert_eq!(got, Some((42, true, "Mom: +1 555 0100".to_string())));
+        // No stray outbound frames from the forwarding.
+        let _ = rx.try_recv();
+    }
+
+    #[tokio::test]
+    async fn session_stop_deactivates_and_unregisters() {
+        let (mut conn, _rx) = conn();
+        conn.on_text(r#"{"type":"session.start","device_id":"dev-a"}"#)
+            .await;
+        {
+            let session = conn.sessions.get("dev-a").await;
+            let mut s = session.write().await;
+            s.active = true;
+            s.canonical_user = Some("user-1".into());
+        }
+        conn.router
+            .register("user-1", "dev-a", conn.out.clone())
+            .await;
+        let stop = conn.on_text(r#"{"type":"session.stop"}"#).await;
+        assert!(stop, "session.stop ends the connection");
+        let session = conn.sessions.get("dev-a").await;
+        let s = session.read().await;
+        assert!(!s.active, "session.stop marks the session inactive");
+        assert!(
+            conn.router.routes_for("user-1", "other").await.is_empty(),
+            "the route is unregistered"
+        );
     }
 
     #[tokio::test]

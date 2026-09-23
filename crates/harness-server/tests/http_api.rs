@@ -185,6 +185,10 @@ fn deps_for(llm: &MockServer, tts: &MockServer, stt: &MockServer) -> RouterDeps 
     let mut config = Config::default();
     config.server.api_keys = Vec::new(); // no auth required
     RouterDeps {
+        router: std::sync::Arc::new(harness_server::state::FederationRouter::new()),
+        identities: std::sync::Arc::new(tokio::sync::RwLock::new(
+            harness_server::identity::IdentityRegistry::default(),
+        )),
         config,
         llm: Arc::new(MockLlm { url: llm.uri() }),
         tts: Arc::new(MockTts { url: tts.uri() }),
@@ -281,6 +285,10 @@ async fn wrong_api_key_is_401() {
     let mut config = Config::default();
     config.server.api_keys = vec!["secret-key".into()];
     let deps = RouterDeps {
+        router: std::sync::Arc::new(harness_server::state::FederationRouter::new()),
+        identities: std::sync::Arc::new(tokio::sync::RwLock::new(
+            harness_server::identity::IdentityRegistry::default(),
+        )),
         config,
         llm: Arc::new(MockLlm { url: llm.uri() }),
         tts: Arc::new(MockTts { url: tts.uri() }),
@@ -370,6 +378,10 @@ async fn missing_api_key_when_required_is_401() {
     let mut config = Config::default();
     config.server.api_keys = vec!["secret-key".into()];
     let deps = RouterDeps {
+        router: std::sync::Arc::new(harness_server::state::FederationRouter::new()),
+        identities: std::sync::Arc::new(tokio::sync::RwLock::new(
+            harness_server::identity::IdentityRegistry::default(),
+        )),
         config,
         llm: Arc::new(MockLlm { url: llm.uri() }),
         tts: Arc::new(MockTts { url: tts.uri() }),
@@ -405,6 +417,10 @@ async fn wav_turn_with_no_speech_still_completes() {
         .await;
 
     let deps = RouterDeps {
+        router: std::sync::Arc::new(harness_server::state::FederationRouter::new()),
+        identities: std::sync::Arc::new(tokio::sync::RwLock::new(
+            harness_server::identity::IdentityRegistry::default(),
+        )),
         config,
         llm: Arc::new(MockLlm { url: llm.uri() }),
         tts: Arc::new(MockTts { url: tts.uri() }),

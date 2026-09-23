@@ -48,6 +48,11 @@ pub struct RouterDeps {
     /// Conversation memory keyed by session id; HTTP turns with a `device_id`
     /// reuse that session so context survives across requests.
     pub sessions: Arc<SessionStore>,
+    /// Cross-session `personal.*` routes for identity federation (shared with
+    /// the WS layer and the orchestrator).
+    pub router: Arc<crate::state::FederationRouter>,
+    /// Persisted identity-key → canonical-user map (federation).
+    pub identities: Arc<tokio::sync::RwLock<crate::identity::IdentityRegistry>>,
 }
 
 impl RouterDeps {
@@ -58,6 +63,9 @@ impl RouterDeps {
             tts: self.tts.clone(),
             stt: self.stt.clone(),
             plugins: self.plugins.clone(),
+            store: Some(self.sessions.clone()),
+            router: Some(self.router.clone()),
+            self_session_id: None, // HTTP turns have no bound WS session
         }
     }
 }

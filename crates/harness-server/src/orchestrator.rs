@@ -1,7 +1,16 @@
 //! Turn orchestration: prompt build → streaming LLM → sentence chunks → TTS →
 //! ordered `AudioChunk`s, with a bounded plugin tool loop. Also the audio path
 //! (`run_audio_utterance`): STT first, then the same pipeline.
+//!
+//! Federation: when the turn's session has a canonical user (resolved from
+//! announced identity keys) and `[personal_context.federation]` is on, the
+//! tool list additionally carries the personal catalogs of the user's other
+//! ACTIVE sessions (deduped by fq name, own definitions first), and
+//! `personal.*` calls route to a sibling device — either because the tool
+//! lives there, or as a bounded fallback when the own client cannot serve a
+//! merged call.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -16,10 +25,21 @@ use harness_providers::tts::TtsProvider;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
+use crate::state::{FederationRouter, Session, SessionStore};
+
 /// Maximum LLM round trips in one turn (initial + up to 7 tool rounds). The
 /// headroom lets multi-step agents (e.g. Home Assistant discovery via
 /// ha_search) recover from bad calls and still answer.
 const MAX_TOOL_ROUNDS: usize = 8;
+
+/// Upper bound on federated routing attempts per client tool call (own client
+/// first, then up to this many sibling sessions in ascending session-id
+/// order). Every attempt uses the configured per-call timeout.
+const MAX_FEDERATION_ATTEMPTS: usize = 3;
+
+/// Sibling-routed calls get ids from the top of the u64 range so they can
+/// never collide with the own client's 1, 2, 3… ids on the same inbox.
+const SIBLING_CALL_ID_BASE: u64 = 1 << 62;
 
 /// Per-turn inbox of client tool results, handed over by the WS layer.
 /// `None` on surfaces without a client (HTTP `POST /v1/turn`).
@@ -33,28 +53,32 @@ const PERSONAL_PREFIX: &str = "personal.";
 /// announced client catalog, so the model knows what `personal.*` is for.
 const PROMPT_HINT: &str = "Personal-context tools (personal.*) return a plain-text digest of the user's calendar, reminders, contacts, or photos from their device. Call them when asked about their schedule, people, or photos.";
 
-/// Classify a `personal.*` tool call: `Some(Execute)` = forward to the client;
-/// `Some(Unavailable(why))` = answer with an error digest the LLM can recover
-/// from; `None` = not a client call (route to server plugins as usual).
+/// Classify outcome for a `personal.*` call: `Execute` = forward to a client
+/// (own or a federated sibling); `Unavailable(why)` = answer with an error
+/// digest the LLM can recover from.
 enum ClientRoute {
     Execute,
     Unavailable(&'static str),
 }
 
-fn classify_client_call(
-    cfg: &Config,
-    session: &crate::state::Session,
-    name: &str,
-) -> Option<ClientRoute> {
+/// Classify a `personal.*` tool call: `Some(Execute)` = forward to a client
+/// (own or a federated sibling); `Some(Unavailable(why))` = answer with an
+/// error digest the LLM can recover from; `None` = not a client call (route
+/// to server plugins as usual).
+fn classify_client_call(deps: &Deps, session: &Session, name: &str) -> Option<ClientRoute> {
     if !name.starts_with(PERSONAL_PREFIX) {
         return None;
     }
-    if !cfg.personal_context.enabled {
+    if !deps.config.personal_context.enabled {
         return Some(ClientRoute::Unavailable(
             "personal context is disabled on the server",
         ));
     }
-    if session.context.resolve(name).is_none() {
+    // Own catalog resolves it (announced or merged sibling-owned — the LLM
+    // saw it in the merged spec list, which build_request derived from the
+    // own catalog plus siblings). Without federation, an unresolvable name
+    // is unknown; with federation, dispatch decides (own client or routed).
+    if session.context.resolve(name).is_none() && !federation_ready(deps, session) {
         return Some(ClientRoute::Unavailable("unknown personal-context tool"));
     }
     Some(ClientRoute::Execute)
@@ -114,13 +138,223 @@ fn clamp_digest(mut text: String, max_bytes: usize) -> String {
 }
 
 /// Injected provider set driving a turn. Trait objects throughout so tests can
-/// drive mocks (and `main.rs` wires the real clients).
+/// drive mocks (and `main.rs` wires the real clients). The federation fields
+/// are `None` in bare test setups and on surfaces without a session store —
+/// there the behavior is exactly v1 (own catalog only, own client only).
 pub struct Deps {
     pub config: Config,
     pub llm: Arc<dyn LlmProvider>,
     pub tts: Arc<dyn TtsProvider>,
     pub stt: Arc<dyn SttProvider>,
     pub plugins: Arc<PluginRegistry>,
+    /// Session registry for cross-session federation (spec merge + routing).
+    pub store: Option<Arc<SessionStore>>,
+    /// Cross-session `personal.*` routes, maintained by ws.rs per connection.
+    pub router: Option<Arc<FederationRouter>>,
+    /// The session this turn belongs to (sibling queries exclude it).
+    pub self_session_id: Option<String>,
+}
+
+/// True when cross-session federation can act for this turn: enabled in
+/// config, a session store + router wired, and the session has a canonical
+/// user (anonymous sessions never merge).
+fn federation_ready(deps: &Deps, session: &Session) -> bool {
+    deps.store.is_some()
+        && deps.router.is_some()
+        && deps.config.personal_context.federation.enabled
+        && session.canonical_user.is_some()
+}
+
+/// True when a sibling session of the same canonical user (with a registered
+/// route — only connected siblings can serve anything) owns this tool name.
+async fn sibling_owns(deps: &Deps, session: &Session, name: &str) -> bool {
+    if !federation_ready(deps, session) {
+        return false;
+    }
+    let store = deps.store.as_ref().expect("checked by federation_ready");
+    let router = deps.router.as_ref().expect("checked by federation_ready");
+    let self_id = deps.self_session_id.as_deref().unwrap_or_default();
+    let canonical = session.canonical_user.as_deref().expect("checked above");
+    for (sib_id, _) in router.routes_for(canonical, self_id).await {
+        let sib = store.get(sib_id).await;
+        if sib.read().await.context.resolve(name).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Sibling sessions' tool specs for the turn: active sessions of the same
+/// canonical user, ascending by session id, deduped against the own fq names
+/// (own definitions always win). Empty when federation is off/unwired.
+async fn merged_client_specs(
+    deps: &Deps,
+    session: &Session,
+    own_specs: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    if !federation_ready(deps, session) {
+        return Vec::new();
+    }
+    let store = deps.store.as_ref().expect("checked by federation_ready");
+    let self_id = deps.self_session_id.as_deref().unwrap_or_default();
+    let canonical = session.canonical_user.as_deref().expect("checked above");
+    let mut seen: HashSet<String> = own_specs
+        .iter()
+        .map(|s| {
+            s["function"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    let mut out = Vec::new();
+    for spec in store.federated_specs(self_id, canonical).await {
+        let name = spec["function"]["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if seen.insert(name) {
+            out.push(spec);
+        }
+    }
+    out
+}
+
+/// Everything one federated routing attempt needs, bundled so the dispatch
+/// helpers stay within clippy's argument limit.
+struct RoutedCall<'a> {
+    router: &'a FederationRouter,
+    sibling_id: &'a str,
+    sib_tx: &'a mpsc::Sender<ServerMsg>,
+    call_id: u64,
+    name: &'a str,
+    arguments: &'a str,
+    timeout: std::time::Duration,
+    max_bytes: usize,
+}
+
+/// Route one call to a sibling session's connection and wait, bounded, for
+/// its client's digest. The sibling connection learns about the pending
+/// reply via [`FederationRouter::take_pending`]: this arms the registry, so
+/// when the sibling's client answers `tool.result`, the sibling's ws layer
+/// forwards `(call_id, ok, text)` into the reply channel.
+async fn routed_dispatch(call: RoutedCall<'_>) -> Result<String, String> {
+    let RoutedCall {
+        router,
+        sibling_id,
+        sib_tx,
+        call_id,
+        name,
+        arguments,
+        timeout,
+        max_bytes,
+    } = call;
+    let (reply_tx, mut reply_rx) = mpsc::channel::<(u64, bool, String)>(4);
+    router.arm_pending(sibling_id, call_id, reply_tx).await;
+    sib_tx
+        .send(ServerMsg::ToolCall {
+            call_id,
+            name: name.into(),
+            arguments: arguments.into(),
+        })
+        .await
+        .map_err(|_| format!("sibling '{sibling_id}' connection closed"))?;
+    match tokio::time::timeout(timeout, reply_rx.recv()).await {
+        Ok(Some((_, true, text))) => Ok(clamp_digest(text, max_bytes)),
+        Ok(Some((_, false, text))) => Err(clamp_digest(text, max_bytes)),
+        Ok(None) => Err(format!("sibling '{sibling_id}' connection closed")),
+        Err(_) => Err(format!(
+            "sibling '{sibling_id}' did not answer '{name}' within the timeout"
+        )),
+    }
+}
+
+/// The call itself (name + allocated ids), bundled so the dispatch helper
+/// stays within clippy's argument limit.
+struct PersonalCall<'a> {
+    own_call_id: u64,
+    sibling_call_id: u64,
+    name: &'a str,
+    arguments: &'a str,
+}
+
+/// Serve one `personal.*` tool call from the best client available: the
+/// turn's own client first (unless the tool lives ONLY on a sibling — the own
+/// client would just let it time out), then the user's other active sessions
+/// in ascending session-id order as the bounded fallback. Every attempt uses
+/// the configured per-call timeout; sibling attempts are capped at
+/// [`MAX_FEDERATION_ATTEMPTS`].
+async fn dispatch_personal_call(
+    deps: &Deps,
+    session: &Session,
+    events: &mpsc::Sender<ServerMsg>,
+    inbox: &mut Option<&mut ToolInbox>,
+    call: PersonalCall<'_>,
+) -> Result<String, String> {
+    let PersonalCall {
+        own_call_id,
+        sibling_call_id,
+        name,
+        arguments,
+    } = call;
+    let timeout = std::time::Duration::from_secs(deps.config.personal_context.call_timeout_secs);
+    let max_bytes = deps.config.personal_context.max_result_bytes;
+
+    // Own client first — except when the own catalog lacks the tool and a
+    // sibling owns it: forwarding to a client that cannot serve the call
+    // would burn a full timeout for nothing.
+    let own_has_tool = session.context.resolve(name).is_some();
+    let sib_has_tool = sibling_owns(deps, session, name).await;
+    let mut own_result: Option<Result<String, String>> = None;
+    if own_has_tool || !sib_has_tool {
+        if let Some(rx) = inbox.as_mut() {
+            own_result = Some(
+                client_tool_dispatch(events, rx, own_call_id, name, arguments, timeout, max_bytes)
+                    .await,
+            );
+            if own_result.as_ref().expect("just set").is_ok() {
+                return own_result.expect("just set");
+            }
+            if deps.router.is_none() {
+                // v1 behavior: no federation, report the own-client error.
+                return own_result.expect("just set");
+            }
+        }
+    }
+
+    // Federated fallback: siblings of the same canonical user, ascending
+    // session id ("first" policy), attempts capped.
+    let Some(router) = deps.router.as_ref() else {
+        return own_result
+            .unwrap_or_else(|| Err("personal context requires a connected client".into()));
+    };
+    let self_id = deps.self_session_id.as_deref().unwrap_or_default();
+    let canonical = session.canonical_user.as_deref().unwrap_or_default();
+    for (attempts, (sib_id, sib_tx)) in router
+        .routes_for(canonical, self_id)
+        .await
+        .into_iter()
+        .enumerate()
+    {
+        if attempts >= MAX_FEDERATION_ATTEMPTS {
+            break;
+        }
+        let result = routed_dispatch(RoutedCall {
+            router,
+            sibling_id: &sib_id,
+            sib_tx: &sib_tx,
+            call_id: sibling_call_id,
+            name,
+            arguments,
+            timeout,
+            max_bytes,
+        })
+        .await;
+        if result.is_ok() {
+            return result;
+        }
+    }
+    own_result.unwrap_or_else(|| Err(format!("no connected device can serve '{name}'")))
 }
 
 /// Days since epoch → (year, month, day) — Howard Hinnant's `civil_from_days`.
@@ -155,24 +389,24 @@ fn utc_now_string() -> String {
 }
 
 /// Build the outgoing chat request: system prompt (with current date/time,
-/// plus the personal-context hint when the session announced a client
-/// catalog) prepended to `messages` (history + new user message), plus tool
-/// specs (server plugins + announced client tools).
-fn build_request(
-    deps: &Deps,
-    session: &crate::state::Session,
-    messages: &[ChatMessage],
-) -> ChatRequest {
+/// plus the personal-context hint when client tools are available) prepended
+/// to `messages` (history + new user message), plus tool specs (server
+/// plugins + announced client tools, own catalog first then federated
+/// siblings deduped by fq name).
+async fn build_request(deps: &Deps, session: &Session, messages: &[ChatMessage]) -> ChatRequest {
     let mut system = format!(
         "{}\nCurrent date/time: {}",
         deps.config.prompts.system,
         utc_now_string()
     );
     let mut specs = deps.plugins.tool_specs();
-    if !session.context.is_empty() {
+    let own_specs = session.context.openai_tool_specs();
+    let federated = merged_client_specs(deps, session, &own_specs).await;
+    if !own_specs.is_empty() || !federated.is_empty() {
         system.push('\n');
         system.push_str(PROMPT_HINT);
-        specs.extend(session.context.openai_tool_specs());
+        specs.extend(own_specs);
+        specs.extend(federated);
     }
     let mut full = vec![ChatMessage::text("system", system)];
     full.extend(messages.iter().cloned());
@@ -310,7 +544,7 @@ fn messages_for_round(history: &[ChatMessage], extra: &[ChatMessage]) -> Vec<Cha
 /// once, after the pipeline finishes (or skips the pipeline entirely).
 async fn execute_turn(
     deps: &Deps,
-    session: &mut crate::state::Session,
+    session: &mut Session,
     user_text: &str,
     events: mpsc::Sender<ServerMsg>,
     mut inbox: Option<&mut ToolInbox>,
@@ -324,7 +558,7 @@ async fn execute_turn(
     let mut final_text = String::new();
 
     for round in 0..MAX_TOOL_ROUNDS {
-        let req = build_request(deps, session, &messages_for_round(&history, &extra));
+        let req = build_request(deps, session, &messages_for_round(&history, &extra)).await;
         let mut seq = 0u32;
         let (tool_calls, text) = run_llm_round(deps, req, &events, &mut seq).await?;
         final_text = text;
@@ -337,8 +571,9 @@ async fn execute_turn(
         // read and recover from, never an abort. Each dispatch is bracketed by
         // `state.thinking` frames so clients can show tool activity.
         // `personal.*` calls bypass the plugin registry: they execute on the
-        // announcing client over the WS, answered via the per-turn inbox.
+        // announcing client (own, or a federated sibling as fallback).
         let mut next_client_call_id = 1u64;
+        let mut next_sibling_call_id = SIBLING_CALL_ID_BASE;
         let mut results: Vec<(String, String)> = Vec::new();
         for (id, name, arguments) in &tool_calls {
             let _ = events
@@ -346,7 +581,7 @@ async fn execute_turn(
                     detail: ThinkingDetail::CallingTools,
                 })
                 .await;
-            let outcome = match classify_client_call(&deps.config, session, name) {
+            let outcome = match classify_client_call(deps, session, name) {
                 None => deps
                     .plugins
                     .dispatch(name, parse_tool_args(arguments))
@@ -356,25 +591,25 @@ async fn execute_turn(
                             .unwrap_or_else(|_| "{\"error\":\"unserializable tool result\"}".into())
                     }),
                 Some(ClientRoute::Unavailable(why)) => Err(why.to_string()),
-                Some(ClientRoute::Execute) => match inbox.as_mut() {
-                    Some(rx) => {
-                        let call_id = next_client_call_id;
-                        next_client_call_id += 1;
-                        client_tool_dispatch(
-                            &events,
-                            rx,
-                            call_id,
+                Some(ClientRoute::Execute) => {
+                    let own_call_id = next_client_call_id;
+                    next_client_call_id += 1;
+                    let sibling_call_id = next_sibling_call_id;
+                    next_sibling_call_id += 1;
+                    dispatch_personal_call(
+                        deps,
+                        session,
+                        &events,
+                        &mut inbox,
+                        PersonalCall {
+                            own_call_id,
+                            sibling_call_id,
                             name,
                             arguments,
-                            std::time::Duration::from_secs(
-                                deps.config.personal_context.call_timeout_secs,
-                            ),
-                            deps.config.personal_context.max_result_bytes,
-                        )
-                        .await
-                    }
-                    None => Err("personal context requires a connected client".into()),
-                },
+                        },
+                    )
+                    .await
+                }
             };
             let _ = events
                 .send(ServerMsg::StateThinking {
@@ -420,7 +655,7 @@ async fn execute_turn(
 /// tool-result channel (WS); `None` on clientless surfaces (HTTP turn).
 pub async fn run_text_turn(
     deps: &Deps,
-    session: &mut crate::state::Session,
+    session: &mut Session,
     user_text: &str,
     events: mpsc::Sender<ServerMsg>,
     inbox: Option<&mut ToolInbox>,
@@ -436,7 +671,7 @@ pub async fn run_text_turn(
 /// `TurnCompleted`, nothing enters history.
 pub async fn run_audio_utterance(
     deps: &Deps,
-    session: &mut crate::state::Session,
+    session: &mut Session,
     pcm16k: &[i16],
     events: mpsc::Sender<ServerMsg>,
     inbox: Option<&mut ToolInbox>,

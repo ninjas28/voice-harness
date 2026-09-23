@@ -11,7 +11,7 @@ use harness_providers::llm::{ChatRequest, ChatStream, LlmEvent, LlmProvider};
 use harness_providers::stt::SttProvider;
 use harness_providers::tts::TtsProvider;
 use harness_server::orchestrator::{run_audio_utterance, run_text_turn, Deps};
-use harness_server::state::{Session, SessionStore};
+use harness_server::state::{FederationRouter, Session, SessionStore};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
@@ -169,6 +169,9 @@ fn deps_with(
             calls: AtomicUsize::new(0),
         }),
         plugins: Arc::new(plugins),
+        store: None,
+        router: None,
+        self_session_id: None,
     }
 }
 
@@ -223,6 +226,9 @@ fn deps_with_cfg(llm: Arc<dyn LlmProvider>, cfg: Config) -> Deps {
             calls: AtomicUsize::new(0),
         }),
         plugins: Arc::new(PluginRegistry::new()),
+        store: None,
+        router: None,
+        self_session_id: None,
     }
 }
 
@@ -674,6 +680,9 @@ async fn audio_utterance_transcribes_then_runs_pipeline() {
         tts,
         stt: stt.clone(),
         plugins: Arc::new(PluginRegistry::new()),
+        store: None,
+        router: None,
+        self_session_id: None,
     };
 
     let (tx, rx) = mpsc::channel(64);
@@ -717,6 +726,9 @@ async fn audio_utterance_empty_transcript_skips_llm() {
         tts: Arc::new(MockTts::new()),
         stt: stt.clone(),
         plugins: Arc::new(PluginRegistry::new()),
+        store: None,
+        router: None,
+        self_session_id: None,
     };
 
     let (tx, rx) = mpsc::channel(64);
@@ -758,6 +770,9 @@ async fn llm_reasoning_effort_flows_from_config_into_every_request() {
             calls: AtomicUsize::new(0),
         }),
         plugins: Arc::new(PluginRegistry::new()),
+        store: None,
+        router: None,
+        self_session_id: None,
     };
 
     let (tx, rx) = mpsc::channel(64);
@@ -1014,6 +1029,279 @@ async fn oversized_digest_is_clamped() {
     assert!(
         content.ends_with("…(truncated)"),
         "truncation marker present: {content:?}"
+    );
+}
+
+// ------------------------------------------------- federation (cross-session)
+
+fn contact_catalog() -> ClientCatalog {
+    ClientCatalog::from_announce(vec![ProviderDescriptor {
+        id: "contacts".into(),
+        tools: vec![ToolDescriptor {
+            name: "search".into(),
+            description: "Search contacts.".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }],
+    }])
+}
+
+/// Mock LLM script: round 1 demands `personal.contacts.search` (the sibling
+/// session's tool), round 2 answers with text quoting the digest.
+fn sibling_call_script() -> Vec<Vec<LlmEvent>> {
+    vec![
+        vec![
+            LlmEvent::ToolCall {
+                id: "call_s".into(),
+                name: "personal.contacts.search".into(),
+                arguments: "{}".into(),
+            },
+            LlmEvent::Done {
+                finish_reason: Some("tool_calls".into()),
+            },
+        ],
+        vec![
+            LlmEvent::Delta("Found them.".into()),
+            LlmEvent::Done {
+                finish_reason: Some("stop".into()),
+            },
+        ],
+    ]
+}
+
+fn federation_deps(llm: Arc<dyn LlmProvider>) -> Deps {
+    Deps {
+        config: Config::default(),
+        llm,
+        tts: Arc::new(MockTts::new()),
+        stt: Arc::new(MockStt {
+            text: String::new(),
+            calls: AtomicUsize::new(0),
+        }),
+        plugins: Arc::new(PluginRegistry::new()),
+        store: Some(Arc::new(SessionStore::new())),
+        router: Some(Arc::new(FederationRouter::new())),
+        self_session_id: Some("mac".into()),
+    }
+}
+
+#[tokio::test]
+async fn merged_specs_contain_both_sessions_catalogs_deduped() {
+    let llm = Arc::new(MockLlm::new(two_sentence_script()));
+    let deps = federation_deps(llm.clone());
+    // Own session: calendar provider. Sibling (same canonical user, active):
+    // contacts provider + a DUPLICATE of the own calendar tool (defined
+    // differently) — the own definition must win, the sibling's copy drop.
+    let own = deps
+        .store
+        .as_ref()
+        .expect("federation store")
+        .get("mac")
+        .await;
+    let mut own = own.write().await;
+    own.active = true;
+    own.canonical_user = Some("user-1".into());
+    own.context = calendar_catalog();
+    drop(own);
+    let sib = deps
+        .store
+        .as_ref()
+        .expect("federation store")
+        .get("mac-sib")
+        .await;
+    let mut sib = sib.write().await;
+    sib.active = true;
+    sib.canonical_user = Some("user-1".into());
+    sib.context = ClientCatalog::from_announce(vec![
+        ProviderDescriptor {
+            id: "contacts".into(),
+            tools: vec![ToolDescriptor {
+                name: "search".into(),
+                description: "Search contacts.".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+        },
+        ProviderDescriptor {
+            id: "calendar".into(),
+            tools: vec![ToolDescriptor {
+                name: "events".into(),
+                description: "Sibling copy of events.".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+        },
+    ]);
+    drop(sib);
+
+    // Run the turn ON the stored session (the canonical user lives there).
+    let session = deps
+        .store
+        .as_ref()
+        .expect("federation store")
+        .get("mac")
+        .await;
+    let mut session = session.write().await;
+    let (tx, rx) = mpsc::channel(64);
+    run_text_turn(&deps, &mut session, "hi", tx, None)
+        .await
+        .unwrap();
+    drop(session);
+    let _ = collect_events_all(rx).await;
+
+    let names: Vec<String> = llm.requests()[0]
+        .tools
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|s| s["function"]["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        names.contains(&"personal.calendar.events".to_string())
+            && names.contains(&"personal.contacts.search".to_string()),
+        "merged specs carry both sessions' tools: {names:?}"
+    );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|n| **n == "personal.calendar.events")
+            .count(),
+        1,
+        "fq-name duplicates deduped, own definition wins: {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn different_canonical_users_never_merge() {
+    let llm = Arc::new(MockLlm::new(two_sentence_script()));
+    let deps = federation_deps(llm.clone());
+    // Own session has NO catalog and a canonical user; sibling belongs to
+    // someone else: no specs merge (and no prompt hint — own catalog empty).
+    let own = deps
+        .store
+        .as_ref()
+        .expect("federation store")
+        .get("mac")
+        .await;
+    let mut own = own.write().await;
+    own.active = true;
+    own.canonical_user = Some("user-1".into());
+    drop(own);
+    let sib = deps
+        .store
+        .as_ref()
+        .expect("federation store")
+        .get("mac-sib")
+        .await;
+    let mut sib = sib.write().await;
+    sib.active = true;
+    sib.canonical_user = Some("user-2".into());
+    sib.context = contact_catalog();
+    drop(sib);
+
+    let (tx, mut rx) = mpsc::channel(64);
+    run_text_turn(&deps, &mut Session::default(), "hi", tx, None)
+        .await
+        .unwrap();
+    let names: Vec<String> = llm.requests()[0]
+        .tools
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|s| s["function"]["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        !names.contains(&"personal.contacts.search".to_string()),
+        "another user's tools never merge: {names:?}"
+    );
+    let _ = rx.recv().await;
+}
+
+#[tokio::test]
+async fn routing_falls_back_to_sibling_when_own_client_times_out() {
+    let llm = Arc::new(MockLlm::new(sibling_call_script()));
+    let mut cfg = Config::default();
+    cfg.personal_context.call_timeout_secs = 1;
+    let mut deps = federation_deps(llm.clone());
+    deps.config = cfg;
+    let deps = deps;
+
+    // Own session owns a DIFFERENT tool; the called tool lives on the sibling.
+    let own = deps
+        .store
+        .as_ref()
+        .expect("federation store")
+        .get("mac")
+        .await;
+    let mut own = own.write().await;
+    own.active = true;
+    own.canonical_user = Some("user-1".into());
+    own.context = calendar_catalog();
+    drop(own);
+    let sib = deps
+        .store
+        .as_ref()
+        .expect("federation store")
+        .get("mac-sib")
+        .await;
+    let mut sib = sib.write().await;
+    sib.active = true;
+    sib.canonical_user = Some("user-1".into());
+    sib.context = contact_catalog();
+    drop(sib);
+
+    // Register the sibling's route channel and stand in for the sibling's ws
+    // layer exactly as production behaves: the connection observes the
+    // forwarded `tool.call`, then — when its client answers `tool.result` —
+    // pops the pending reply the orchestrator armed under its session and
+    // forwards the (call_id, ok, text) into it.
+    let router = deps.router.as_ref().expect("federation router").clone();
+    let (route_tx, mut route_rx) = mpsc::channel::<ServerMsg>(16);
+    router.register("user-1", "mac-sib", route_tx.clone()).await;
+    let replier = tokio::spawn(async move {
+        if let Ok(Some(ServerMsg::ToolCall { call_id, .. })) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), route_rx.recv()).await
+        {
+            let reply = router.take_pending("mac-sib", call_id).await;
+            assert!(reply.is_some(), "orchestrator armed the pending reply");
+            reply
+                .expect("pending armed")
+                .send((call_id, true, "Mom: +1 555 0100".into()))
+                .await
+                .expect("asking turn still waiting");
+        }
+    });
+
+    // No own-client inbox: the first (fixed-inbox) attempt cannot succeed —
+    // the fallback must route to the sibling and feed its digest to the LLM.
+    // The turn runs ON the stored session (canonical user lives there).
+    let session = deps
+        .store
+        .as_ref()
+        .expect("federation store")
+        .get("mac")
+        .await;
+    let mut session = session.write().await;
+    let (tx, rx) = mpsc::channel(64);
+    run_text_turn(&deps, &mut session, "hi", tx, None)
+        .await
+        .expect("turn completes via the sibling fallback");
+    drop(session);
+    replier.abort();
+    let _ = collect_events_all(rx).await;
+
+    let reqs = llm.requests();
+    assert_eq!(reqs.len(), 2, "sibling answer forces a second LLM round");
+    let tool_msg = reqs[1]
+        .messages
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("tool message present");
+    assert!(
+        tool_msg
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Mom"),
+        "sibling digest reaches the LLM via the routed fallback: {:?}",
+        tool_msg.content
     );
 }
 
