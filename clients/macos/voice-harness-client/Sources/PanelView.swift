@@ -99,6 +99,17 @@ struct PanelView: View {
                        get: { runtime.personalContextEnabled },
                        set: { runtime.setPersonalContextEnabled($0) }))
                 .font(.caption)
+            // Raw stores (v1.5): on = probe Messages/Mail/Notes access (the
+            // deliberate FDA + Automation TCC moment) and re-announce; off =
+            // re-announce the remaining v1 catalog, clearing the raw tools.
+            Toggle("Raw stores (messages, mail, notes)",
+                   isOn: Binding(
+                       get: { runtime.rawStoresEnabled },
+                       set: { runtime.setRawStoresEnabled($0) }))
+                .font(.caption)
+            Text("Reads Messages, Mail, and Notes data on this Mac. Requires Full Disk Access and Automation permission.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             if let settingsError {
                 Text(settingsError).font(.caption).foregroundStyle(.red)
             }

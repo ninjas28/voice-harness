@@ -174,6 +174,19 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertFalse(AppSettings.personalContextEnabled)
     }
 
+    // MARK: - Raw stores toggle (raw-stores v1.5 Task 6)
+
+    func testRawStoresDefaultsToDisabled() {
+        XCTAssertFalse(AppSettings.rawStoresEnabled)
+    }
+
+    func testRawStoresRoundTrips() {
+        AppSettings.setRawStoresEnabled(true)
+        XCTAssertTrue(AppSettings.rawStoresEnabled)
+        AppSettings.setRawStoresEnabled(false)
+        XCTAssertFalse(AppSettings.rawStoresEnabled)
+    }
+
     // MARK: - Identity key cache (Task 6, federation)
 
     func testIdentityKeysDefaultToEmpty() {

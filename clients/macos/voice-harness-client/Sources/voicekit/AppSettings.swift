@@ -136,6 +136,23 @@ public enum AppSettings {
         defaults.set(value, forKey: personalContextEnabledKey)
     }
 
+    // MARK: - Raw stores toggle (raw-stores v1.5)
+
+    /// Second opt-in tier for raw-store providers (messages, mail, notes).
+    /// Default off: enabling it is the deliberate TCC moment (Full Disk
+    /// Access + Automation prompts fire only from the toggle flip), so users
+    /// who never opt in get zero authorization requests. Raw providers
+    /// announce only when BOTH this and `personalContextEnabled` are on.
+    public static let rawStoresEnabledKey = "raw_stores_enabled"
+
+    public static var rawStoresEnabled: Bool {
+        defaults.bool(forKey: rawStoresEnabledKey)
+    }
+
+    public static func setRawStoresEnabled(_ value: Bool) {
+        defaults.set(value, forKey: rawStoresEnabledKey)
+    }
+
     // MARK: - TTS playback rate
 
     public static let ttsRateKey = "tts_rate"

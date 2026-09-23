@@ -24,8 +24,8 @@ public final class MessagesProvider: PersonalContextProvider, @unchecked Sendabl
     ///   - dbPath: chat.db path; defaults to `~/Library/Messages/chat.db`.
     ///   - statementTimeout: per-statement bound handed to the reader.
     ///   - now: test-only wall-clock override for search windows.
-    init(dbPath: String? = nil, statementTimeout: TimeInterval = 3.0,
-         now: Date? = nil) {
+    public init(dbPath: String? = nil, statementTimeout: TimeInterval = 3.0,
+                now: Date? = nil) {
         let home = FileManager.default.homeDirectoryForCurrentUser
         self.reader = SQLiteReader(
             path: dbPath ?? home.appendingPathComponent("Library/Messages/chat.db").path,

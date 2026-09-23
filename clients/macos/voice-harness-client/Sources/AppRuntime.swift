@@ -35,6 +35,10 @@ final class AppRuntime: ObservableObject {
     /// enabled. Persisted; flipped only through `setPersonalContextEnabled`,
     /// which owns the authorization + announce side effects.
     @Published private(set) var personalContextEnabled = AppSettings.personalContextEnabled
+    /// Whether raw-store providers (messages, mail, notes) are enabled.
+    /// Persisted; flipped only through `setRawStoresEnabled`, which owns the
+    /// gate verification (the deliberate TCC moment) + announce side effects.
+    @Published private(set) var rawStoresEnabled = AppSettings.rawStoresEnabled
 
     /// The wire→UI state machine; single source of truth, mirrored above.
     let model = HarnessSessionModel()
@@ -157,6 +161,10 @@ final class AppRuntime: ObservableObject {
             errorMessage = "Can't reach harness server at \(serverURL.host ?? "?"): \(error.localizedDescription)"
             return
         }
+        // The announce covers the full installed catalog (raw providers are
+        // inside the server exactly when both toggles are on, and their
+        // descriptors appear only when their gates pass — verified at the
+        // toggle flip; probes here are quiet re-checks).
         if AppSettings.personalContextEnabled, let server = client.personalContextServer {
             do {
                 try await client.sendAnnounce(providers: await server.announceProviders(),
@@ -209,7 +217,8 @@ final class AppRuntime: ObservableObject {
     /// photos). Enabling is the one deliberate TCC moment: requests access for
     /// all three providers up front, then announces the authorized set on the
     /// live session (or defers to the next `start` when offline). Disabling
-    /// announces an empty provider list to clear the server-side catalog.
+    /// announces an empty provider list to clear the server-side catalog —
+    /// for everything, including raw stores when they were riding along.
     func setPersonalContextEnabled(_ enabled: Bool) {
         AppSettings.setPersonalContextEnabled(enabled)
         personalContextEnabled = enabled
@@ -234,14 +243,66 @@ final class AppRuntime: ObservableObject {
         }
     }
 
+    #if os(macOS)
+    /// Enables/disables the raw-store providers (messages, mail, notes).
+    /// Enabling verifies their gates here — read-only SQLite opens and the
+    /// osascript probe, the deliberate FDA/Automation TCC moment — then
+    /// re-announces the live catalog. Disabling re-announces the remaining
+    /// v1 catalog (or an empty list when the master toggle is off too),
+    /// which clears the raw tools server-side. Gates fire only from this
+    /// toggle flip, never in tests or unattended runs.
+    func setRawStoresEnabled(_ enabled: Bool) {
+        AppSettings.setRawStoresEnabled(enabled)
+        rawStoresEnabled = enabled
+        // The cached server must reflect the new provider set; rebuilding is
+        // cheap (providers are stateless beyond sticky authorization).
+        personalContextServer = nil
+        guard enabled else {
+            Task { [weak self] in
+                guard let self else { return }
+                guard self.personalContextEnabled, let client = self.client else { return }
+                let server = self.getOrBuildPersonalContextServer()
+                try? await client.sendAnnounce(providers: await server.announceProviders(),
+                                               identityKeys: self.identityKeys)
+            }
+            return
+        }
+        // Verify gates + announce off the button tap: the probes may block
+        // briefly, and first-time FDA/Automation prompts appear here only.
+        Task { [weak self] in
+            guard let self else { return }
+            guard self.personalContextEnabled else { return } // master toggle off
+            let server = self.getOrBuildPersonalContextServer() // now carries raw providers
+            let descriptors = await server.announceProviders() // gates fire here
+            guard self.rawStoresEnabled, self.personalContextEnabled else { return } // toggled off mid-probe
+            if let client = self.client {
+                try? await client.sendAnnounce(providers: descriptors,
+                                               identityKeys: self.identityKeys)
+            }
+        }
+    }
+    #endif
+
     /// Lazily constructs the personal-context server (one instance, cached).
+    /// On macOS, when the raw-stores tier is enabled, the provider list gains
+    /// the raw-store providers (messages, mail, notes) so ONE server routes
+    /// `personal.*` calls for everything. Raw providers are constructed only
+    /// behind the second toggle (#if os(macOS); they do not exist on iOS).
     private func getOrBuildPersonalContextServer() -> PersonalContextServer {
         if let personalContextServer { return personalContextServer }
-        let server = PersonalContextServer(providers: [
+        var providers: [any PersonalContextProvider] = [
             EventKitProvider(),
             ContactsProvider(),
             PhotosProvider(),
-        ])
+        ]
+        #if os(macOS)
+        if AppSettings.rawStoresEnabled {
+            providers.append(MessagesProvider())
+            providers.append(MailProvider())
+            providers.append(NotesProvider())
+        }
+        #endif
+        let server = PersonalContextServer(providers: providers)
         personalContextServer = server
         return server
     }

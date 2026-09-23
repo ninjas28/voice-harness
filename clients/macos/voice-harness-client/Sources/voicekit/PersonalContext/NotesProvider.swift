@@ -25,7 +25,7 @@ public final class NotesProvider: PersonalContextProvider, @unchecked Sendable {
     ///   - storePath: NoteStore.sqlite path; defaults to the Notes group
     ///     container on this Mac.
     ///   - statementTimeout: per-statement bound handed to the reader.
-    init(storePath: String? = nil, statementTimeout: TimeInterval = 3.0) {
+    public init(storePath: String? = nil, statementTimeout: TimeInterval = 3.0) {
         self.reader = SQLiteReader(path: storePath ?? NoteStoreReader.defaultPath,
                                    statementTimeout: statementTimeout)
         self.gateProvider = NotesGate(reader: reader)

@@ -8,8 +8,8 @@ import Foundation
 /// spawn, so a chatty stderr cannot deadlock stdout. Scripts are passed via
 /// `osascript -e` and stdin is a closed pipe — nothing is ever read from
 /// stdin, so the plan's 5 s stdin bound holds structurally.
-enum Osascript {
-    enum Error: Swift.Error, Equatable {
+public enum Osascript {
+    public enum Error: Swift.Error, Equatable {
         /// osascript is not present/executable.
         case missingBinary
         /// The script exceeded its wall-clock bound and was killed.
@@ -21,7 +21,7 @@ enum Osascript {
     private static let binaryPath = "/usr/bin/osascript"
 
     /// Runs one AppleScript and returns its trimmed stdout.
-    static func run(_ script: String, timeout: Duration = .seconds(10)) async throws -> String {
+    public static func run(_ script: String, timeout: Duration = .seconds(10)) async throws -> String {
         guard FileManager.default.isExecutableFile(atPath: binaryPath) else {
             throw Error.missingBinary
         }

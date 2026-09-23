@@ -1,7 +1,7 @@
 import Foundation
 
 /// Closure seam for AppleScript execution (real runner uses `Osascript.run`).
-typealias AppleScriptRunner = @Sendable (String) async throws -> String
+public typealias AppleScriptRunner = @Sendable (String) async throws -> String
 
 /// Personal-context provider over Mail.app via bounded osascript. The gate
 /// probe (`application "Mail" is running` + a trivial read) doubles as the
@@ -22,7 +22,7 @@ public actor MailProvider: PersonalContextProvider {
 
     /// - Parameter runner: AppleScript execution seam; defaults to the real
     ///   bounded osascript runner.
-    init(runner: @escaping AppleScriptRunner = { try await Osascript.run($0, timeout: .seconds(10)) }) {
+    public init(runner: @escaping AppleScriptRunner = { try await Osascript.run($0, timeout: .seconds(10)) }) {
         self.runner = runner
     }
 
