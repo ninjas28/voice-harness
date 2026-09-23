@@ -13,6 +13,10 @@ public protocol PersonalContextProvider: Sendable {
     /// Execute a bare tool name with the raw JSON arguments string.
     /// Returns plain spoken-style digest text or throws.
     func execute(name: String, argumentsJSON: String) async throws -> String
+    /// Access gate consulted before the provider is announced. Defaults to a
+    /// passthrough (always true) so v1 providers need zero changes; raw-store
+    /// providers supply a real probe.
+    var gate: PersonalContextGate { get }
 }
 
 /// Failures providers surface; the server converts them into plain-language

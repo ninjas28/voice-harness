@@ -64,12 +64,15 @@ public actor PersonalContextServer {
                          identityKeys: identityKeys)
     }
 
-    /// Descriptors of the currently-authorized providers — the payload of
-    /// `context.announce`. Calling this is also what triggers each provider's
-    /// lazy authorization (TCC), so runtimes use it to pre-grant access.
+    /// Descriptors of the currently-usable providers — the payload of
+    /// `context.announce`. A provider is announced only when its gate passes
+    /// AND it returns a descriptor (nil descriptors omit the provider).
+    /// Calling this is also what triggers each provider's lazy authorization
+    /// (TCC), so runtimes use it to pre-grant access.
     public func announceProviders() async -> [ProviderDescriptor] {
         var descriptors: [ProviderDescriptor] = []
         for provider in providers {
+            guard await provider.gate.verifyAccess() else { continue }
             if let descriptor = await provider.currentDescriptor() {
                 descriptors.append(descriptor)
             }
