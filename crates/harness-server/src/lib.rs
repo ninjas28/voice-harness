@@ -2,6 +2,7 @@
 
 pub mod client_tools;
 pub mod http;
+pub mod identity;
 pub mod orchestrator;
 pub mod state;
 pub mod ws;
