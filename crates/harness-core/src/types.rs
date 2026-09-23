@@ -29,7 +29,15 @@ pub enum ClientMsg {
     #[serde(rename = "session.stop")]
     SessionStop,
     #[serde(rename = "context.announce")]
-    ContextAnnounce { providers: Vec<ProviderDescriptor> },
+    ContextAnnounce {
+        providers: Vec<ProviderDescriptor>,
+        /// Identity keys for cross-device personal-context federation
+        /// (iCloud record name, platform UUID, me-contact email), in
+        /// client-chosen precedence order. Optional: absent (old clients) =
+        /// empty, no federation.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        identity_keys: Vec<String>,
+    },
     #[serde(rename = "tool.result")]
     ToolResult {
         call_id: u64,
@@ -256,13 +264,27 @@ mod tests {
         // the tool object's closing brace).
         let json = r#"{"type":"context.announce","providers":[{"id":"calendar","tools":[{"name":"calendar.events","description":"List events.","parameters":{"properties":{},"type":"object"}}]}]}"#;
         let de: ClientMsg = serde_json::from_str(json).unwrap();
-        let ClientMsg::ContextAnnounce { providers } = de.clone() else {
+        let ClientMsg::ContextAnnounce { providers, .. } = de.clone() else {
             panic!("wrong variant")
         };
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "calendar");
         assert_eq!(providers[0].tools[0].name, "calendar.events");
         assert_eq!(serde_json::to_string(&de).unwrap(), json);
+    }
+
+    #[test]
+    fn context_announce_identity_keys_survive_roundtrip() {
+        // A client may attach identity keys (iCloud record name, platform UUID,
+        // me-contact email) to its announce for cross-device federation. They
+        // must survive a parse/serialize roundtrip.
+        let json = r#"{"type":"context.announce","providers":[],"identity_keys":["icloud:rec-1","platform:ABC-123"]}"#;
+        let de: ClientMsg = serde_json::from_str(json).unwrap();
+        let reser = serde_json::to_string(&de).unwrap();
+        assert!(
+            reser.contains(r#""identity_keys":["icloud:rec-1","platform:ABC-123"]"#),
+            "identity keys must survive the announce roundtrip, got {reser}"
+        );
     }
 
     #[test]

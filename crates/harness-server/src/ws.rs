@@ -470,7 +470,7 @@ impl ConnState {
             // Client context catalog: upsert on the bound session. No session
             // yet (announce before `session.start`) → warn + ignore: the
             // client re-announces after the handshake per the protocol order.
-            ClientMsg::ContextAnnounce { providers } => match self.session_id.clone() {
+            ClientMsg::ContextAnnounce { providers, .. } => match self.session_id.clone() {
                 Some(id) => {
                     let session = self.sessions.get(id).await;
                     session.write().await.context = ClientCatalog::from_announce(providers);
@@ -906,7 +906,11 @@ mod tests {
         conn.on_text(r#"{"type":"session.start","device_id":"dev-a"}"#)
             .await;
         let providers = calendar_announce();
-        let msg = serde_json::to_string(&ClientMsg::ContextAnnounce { providers }).unwrap();
+        let msg = serde_json::to_string(&ClientMsg::ContextAnnounce {
+            providers,
+            identity_keys: Vec::new(),
+        })
+        .unwrap();
         conn.on_text(&msg).await;
 
         let session = conn.sessions.get("dev-a").await;
@@ -932,6 +936,7 @@ mod tests {
         // No session.start: the announce has nowhere to land.
         let msg = serde_json::to_string(&ClientMsg::ContextAnnounce {
             providers: calendar_announce(),
+            identity_keys: Vec::new(),
         })
         .unwrap();
         let end = conn.on_text(&msg).await;
@@ -950,6 +955,7 @@ mod tests {
             .await;
         let msg = serde_json::to_string(&ClientMsg::ContextAnnounce {
             providers: calendar_announce(),
+            identity_keys: Vec::new(),
         })
         .unwrap();
         conn.on_text(&msg).await;
