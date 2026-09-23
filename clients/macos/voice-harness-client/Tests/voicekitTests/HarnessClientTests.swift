@@ -251,4 +251,31 @@ final class HarnessClientTests: XCTestCase {
                        #"{"type":"context.announce","providers":[]}"#)
         await client.stop()
     }
+
+    // MARK: - Identity keys on the announce (Task 6, federation)
+
+    /// The server groups devices of one person via `identity_keys` — the
+    /// field stays absent (v1 back-compat) when none are provided.
+    func testSendAnnounceWithoutIdentityKeysOmitsField() async throws {
+        let (client, stub, _) = makeClient()
+        try await client.start(deviceId: nil)
+        try await client.sendAnnounce(providers: [], identityKeys: [])
+        let sent = await stub.sent
+        XCTAssertEqual(sent.last,
+                       #"{"type":"context.announce","providers":[]}"#,
+                       "no keys → field absent, matching the server's skip-serializing_if contract")
+        await client.stop()
+    }
+
+    /// Keys ride the announce as a bare string array after the providers.
+    func testSendAnnounceCarriesIdentityKeys() async throws {
+        let (client, stub, _) = makeClient()
+        try await client.start(deviceId: nil)
+        try await client.sendAnnounce(providers: [], identityKeys: ["icloud:rec-1", "platform_uuid:UUID-1"])
+        let sent = await stub.sent
+        XCTAssertEqual(sent.last,
+                       #"{"type":"context.announce","providers":[],"identity_keys":["icloud:rec-1","platform_uuid:UUID-1"]}"#,
+                       "frame was: \(sent.last ?? "nil")")
+        await client.stop()
+    }
 }

@@ -56,9 +56,12 @@ public actor PersonalContextServer {
 
     /// The `context.announce` message built from currently-authorized
     /// providers. An empty providers list is valid: it clears the server-side
-    /// catalog (used when the user disables personal context).
-    public func announceMessage() async -> ClientMessage {
-        .contextAnnounce(providers: await announceProviders())
+    /// catalog (used when the user disables personal context). `identityKeys`
+    /// ride along when the runtime computed them (federation); default empty
+    /// keeps every existing construction v1-shaped.
+    public func announceMessage(identityKeys: [String] = []) async -> ClientMessage {
+        .contextAnnounce(providers: await announceProviders(),
+                         identityKeys: identityKeys)
     }
 
     /// Descriptors of the currently-authorized providers — the payload of

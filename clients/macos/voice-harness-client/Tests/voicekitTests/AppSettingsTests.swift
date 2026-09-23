@@ -173,4 +173,39 @@ final class AppSettingsTests: XCTestCase {
         AppSettings.setPersonalContextEnabled(false)
         XCTAssertFalse(AppSettings.personalContextEnabled)
     }
+
+    // MARK: - Identity key cache (Task 6, federation)
+
+    func testIdentityKeysDefaultToEmpty() {
+        XCTAssertEqual(AppSettings.identityKeys, [])
+    }
+
+    func testIdentityKeysRoundTrip() {
+        AppSettings.setIdentityKeys(["icloud:rec-1", "platform_uuid:UUID-1"])
+        XCTAssertEqual(AppSettings.identityKeys, ["icloud:rec-1", "platform_uuid:UUID-1"])
+    }
+
+    func testIdentityKeysSetEmptyRemovesCache() {
+        AppSettings.setIdentityKeys(["icloud:rec-1"])
+        AppSettings.setIdentityKeys([])
+        XCTAssertEqual(AppSettings.identityKeys, [])
+        XCTAssertNil(AppSettings.defaults.object(forKey: "identity_keys_json"),
+                     "empty keys must remove the cache entry so re-resolve is triggered")
+    }
+
+    func testIdentityKeysInvalidJSONReadsEmpty() {
+        AppSettings.setIdentityKeys(["icloud:rec-1"])
+        AppSettings.defaults.set("not json", forKey: "identity_keys_json")
+        XCTAssertEqual(AppSettings.identityKeys, [])
+    }
+
+    func testIdentityKeysNonArrayJSONReadsEmpty() {
+        AppSettings.defaults.set("{\"a\":1}", forKey: "identity_keys_json")
+        XCTAssertEqual(AppSettings.identityKeys, [])
+    }
+
+    func testIdentityKeysNonStringEntriesAreFiltered() {
+        AppSettings.defaults.set("[\"icloud:rec-1\", 7, null]", forKey: "identity_keys_json")
+        XCTAssertEqual(AppSettings.identityKeys, ["icloud:rec-1"])
+    }
 }

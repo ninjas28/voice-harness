@@ -53,6 +53,22 @@ final class AppRuntime: ObservableObject {
     /// every session.
     private var personalContextServer: PersonalContextServer?
 
+    /// Identity keys announced with `context.announce` (federation). Computed
+    /// once: the resolver probes CloudKit / IOKit / Contacts only while the
+    /// `AppSettings` cache is empty, then the keys persist until re-resolve.
+    @Published private(set) var identityKeys: [String] = AppSettings.identityKeys
+
+    /// Test seam: builds the production resolver (icloud > platform_uuid >
+    /// me_email). Tests replace it with stub providers. Unsafe-annotated like
+    /// `AppSettings.defaults` — replaced only from test setup, read at start.
+    nonisolated(unsafe) static var identityResolverFactory: () -> IdentityResolver = {
+        IdentityResolver(providers: [
+            ICloudAccountId(),
+            PlatformUUIDProvider(),
+            MeEmailProvider(),
+        ])
+    }
+
     private init() {
         // @Published projections emit *after* mutation — safe to mirror here.
         model.$phase.dropFirst().sink { [weak self] in self?.phase = $0 }.store(in: &cancellables)
@@ -62,6 +78,26 @@ final class AppRuntime: ObservableObject {
         model.$responseText.dropFirst().sink { [weak self] in self?.responseText = $0 }.store(in: &cancellables)
         model.$activity.dropFirst().sink { [weak self] in self?.activity = $0 }.store(in: &cancellables)
         model.$errorMessage.dropFirst().sink { [weak self] in self?.errorMessage = $0 }.store(in: &cancellables)
+    }
+
+    /// Resolves identity keys exactly once (plan Task 6): the detached
+    /// resolver task runs only while the `AppSettings` cache is empty —
+    /// an empty result stays uncached so the next start re-resolves
+    /// (offline-tolerant: iCloud may work later). The announce always sends
+    /// whatever is known at start time; the detached task's result lands in
+    /// the cache for subsequent sessions.
+    private func resolveIdentityKeysIfNeeded() {
+        guard AppSettings.identityKeys.isEmpty else {
+            identityKeys = AppSettings.identityKeys
+            return
+        }
+        let resolver = Self.identityResolverFactory()
+        Task.detached(priority: .utility) { [weak self] in
+            let keys = await resolver.identityKeys()
+            guard !keys.isEmpty else { return } // stay uncached → re-resolve later
+            AppSettings.setIdentityKeys(keys)
+            await MainActor.run { self?.identityKeys = keys }
+        }
     }
 
     func toggle() async {
@@ -94,6 +130,10 @@ final class AppRuntime: ObservableObject {
         errorMessage = nil
         model.reset()
 
+        // Identity federation: resolve keys once (detached, cache-gated) so
+        // they ride every announce this session and later ones.
+        resolveIdentityKeysIfNeeded()
+
         let serverURL = AppSettings.serverURL
         // Order matters on macOS: the input tap must be installed and the
         // engine prepared BEFORE engine.start() — tapping a running engine's
@@ -119,7 +159,8 @@ final class AppRuntime: ObservableObject {
         }
         if AppSettings.personalContextEnabled, let server = client.personalContextServer {
             do {
-                try await client.sendAnnounce(providers: await server.announceProviders())
+                try await client.sendAnnounce(providers: await server.announceProviders(),
+                                              identityKeys: identityKeys)
             } catch {
                 // Non-fatal: the session still works, just without personal
                 // tools until the next announce (toggle flip or reconnect).
@@ -175,7 +216,7 @@ final class AppRuntime: ObservableObject {
         guard enabled else {
             // Clear the catalog server-side; stop routing tool calls.
             if let client {
-                Task { try? await client.sendAnnounce(providers: []) }
+                Task { try? await client.sendAnnounce(providers: [], identityKeys: identityKeys) }
             }
             return
         }
@@ -187,7 +228,8 @@ final class AppRuntime: ObservableObject {
             let descriptors = await server.announceProviders()
             guard self.personalContextEnabled else { return } // toggled off mid-prompt
             if let client = self.client {
-                try? await client.sendAnnounce(providers: descriptors)
+                try? await client.sendAnnounce(providers: descriptors,
+                                               identityKeys: self.identityKeys)
             }
         }
     }

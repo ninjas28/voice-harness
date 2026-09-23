@@ -151,4 +151,32 @@ public enum AppSettings {
     public static func setTTSRate(_ value: Float) {
         defaults.set(value, forKey: ttsRateKey)
     }
+
+    // MARK: - Identity keys cache (federation, plan 2026-09-21_235410)
+
+    /// Cached identity keys (`<keyId>:<value>` strings) computed once at
+    /// runtime start by the detached `IdentityResolver` task. Cached so
+    /// repeated starts don't re-probe CloudKit/IOKit/Contacts; an empty
+    /// result removes the entry so the next start re-resolves.
+    public static let identityKeysKey = "identity_keys_json"
+
+    public static var identityKeys: [String] {
+        guard let raw = defaults.string(forKey: identityKeysKey) else { return [] }
+        // Decode the JSON array; tolerate garbage (never crash on settings).
+        guard let data = raw.data(using: .utf8),
+              let values = try? JSONSerialization.jsonObject(with: data) as? [Any]
+        else { return [] }
+        return values.compactMap { $0 as? String }
+    }
+
+    public static func setIdentityKeys(_ values: [String]) {
+        guard !values.isEmpty else {
+            defaults.removeObject(forKey: identityKeysKey)
+            return
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: values),
+              let raw = String(data: data, encoding: .utf8)
+        else { return }
+        defaults.set(raw, forKey: identityKeysKey)
+    }
 }

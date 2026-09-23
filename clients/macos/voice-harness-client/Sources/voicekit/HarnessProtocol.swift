@@ -91,7 +91,7 @@ public enum ClientMessage: Equatable, Sendable {
     case speechEnd
     case sessionStop
     case toolResult(callId: Int, ok: Bool, text: String)
-    case contextAnnounce(providers: [ProviderDescriptor])
+    case contextAnnounce(providers: [ProviderDescriptor], identityKeys: [String])
 
     public func encode() -> String {
         var o = [String]()
@@ -106,9 +106,16 @@ public enum ClientMessage: Equatable, Sendable {
         case .toolResult(let callId, let ok, let text):
             o = ["{\"type\":\"tool.result\",\"call_id\":\(callId),\"ok\":\(ok),",
                  "\"text\":\(Self.jsonEscaped(text))}"]
-        case .contextAnnounce(let providers):
+        case .contextAnnounce(let providers, let identityKeys):
             o = ["{\"type\":\"context.announce\",\"providers\":",
-                 Self.providersJSON(providers), "}"]
+                 Self.providersJSON(providers)]
+            // Server contract (plan Task 1): identity_keys is optional —
+            // present only when non-empty, so empty keys reproduce the v1
+            // frame byte-for-byte (server skip-serializes the field).
+            if !identityKeys.isEmpty {
+                o.append(",\"identity_keys\":\(Self.identityKeysJSON(identityKeys))")
+            }
+            o.append("}")
         }
         return o.joined()
     }
@@ -128,6 +135,15 @@ public enum ClientMessage: Equatable, Sendable {
     /// `ProviderDescriptor`), spliced into the hand-rolled envelope.
     private static func providersJSON(_ providers: [ProviderDescriptor]) -> String {
         guard let data = try? JSONEncoder().encode(providers) else { return "[]" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Encodes the identity keys as a JSON string array via JSONSerialization
+    /// (values are simple `keyId:value` strings; escaping is still correct).
+    private static func identityKeysJSON(_ keys: [String]) -> String {
+        guard !keys.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: keys)
+        else { return "[]" }
         return String(decoding: data, as: UTF8.self)
     }
 }

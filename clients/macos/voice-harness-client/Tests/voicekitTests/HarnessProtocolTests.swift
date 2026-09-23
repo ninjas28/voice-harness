@@ -50,7 +50,7 @@ final class HarnessProtocolTests: XCTestCase {
     func testContextAnnounceEncode() throws {
         let json = ClientMessage.contextAnnounce(providers: [
             .init(id: "calendar", tools: [.init(name: "events", description: "List events.", parameters: ["type": .string("object")])])
-        ]).encode()
+        ], identityKeys: []).encode()
         XCTAssertTrue(json.hasPrefix(#"{"type":"context.announce","providers":"#))
         // decode-back check via JSONSerialization for id/tool name round-trip
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])

@@ -172,10 +172,16 @@ public final class HarnessClient: @unchecked Sendable {
 
     /// Builds and sends a `context.announce` frame. An empty `providers`
     /// list is valid: it clears the server-side catalog (the disable path).
+    /// `identityKeys` ride the same frame so the server can group devices of
+    /// one person into a canonical user; empty/omitted keys keep the v1 wire
+    /// shape exactly (no `identity_keys` field — server back-compat).
     /// Throws when the connection is down; callers decide whether an announce
     /// failure matters (the turn loop just won't see the tools).
-    public func sendAnnounce(providers: [ProviderDescriptor]) async throws {
-        try await transport.send(ClientMessage.contextAnnounce(providers: providers).encode())
+    public func sendAnnounce(providers: [ProviderDescriptor],
+                             identityKeys: [String] = []) async throws {
+        try await transport.send(
+            ClientMessage.contextAnnounce(providers: providers,
+                                          identityKeys: identityKeys).encode())
     }
 
     /// Called by the runtime when queued playback has drained (the drain

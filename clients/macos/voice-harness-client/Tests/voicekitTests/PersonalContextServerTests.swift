@@ -148,7 +148,7 @@ final class PersonalContextServerTests: XCTestCase {
             EchoProvider(id: "contacts", descriptor: descriptor(id: "contacts", tool: "search"), error: nil),
         ])
         let message = await server.announceMessage()
-        XCTAssertEqual(message, .contextAnnounce(providers: [descriptor(id: "contacts", tool: "search")]))
+        XCTAssertEqual(message, .contextAnnounce(providers: [descriptor(id: "contacts", tool: "search")], identityKeys: []))
     }
 
     func testAnnounceWithNoAuthorizedProvidersIsEmptyList() async {
@@ -156,6 +156,6 @@ final class PersonalContextServerTests: XCTestCase {
             EchoProvider(id: "calendar", descriptor: nil, error: nil),
         ])
         let message = await server.announceMessage()
-        XCTAssertEqual(message, .contextAnnounce(providers: []))
+        XCTAssertEqual(message, .contextAnnounce(providers: [], identityKeys: []))
     }
 }
