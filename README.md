@@ -121,6 +121,12 @@ crosses CloudKit — identity keys only; the registry lives server-side at
 `config/personal-context-identities.json` and the trust boundary is the
 server's API-key auth.
 
+A second, macOS-only opt-in tier reads the raw stores directly: Messages
+(chat.db), Mail (Mail.app via AppleScript), and Notes (NoteStore.sqlite) —
+behind a separate "Raw stores" toggle in the panel. Enabling it triggers the
+Full Disk Access and Automation permission prompts; digests stay read-only and
+fail soft when a store can't be read.
+
 ### Sentence-end gate
 
 VAD endpointing fires on any pause longer than `session.silence_ms`, so a
