@@ -111,3 +111,11 @@ enabled = ["time", "web_search", "weather"]
 enabled = true                       # master gate: false = no specs advertised, calls error immediately
 call_timeout_secs = 10               # per client tool call wait bound before an error digest is returned
 max_result_bytes = 8192              # server-side clamp on digest text length before it enters history
+
+# Cross-device personal-context federation: clients announce identity keys
+# (iCloud record name, platform UUID, me-contact email) and sessions of the
+# same canonical user share their catalogs; personal.* calls route to a
+# device that can serve them (bounded fallback to the next matching session).
+[personal_context.federation]
+enabled = true                       # false = each session's catalog stays its own (v1 behavior)
+registry_path = "config/personal-context-identities.json"  # chmod 600, never commit (gitignored)

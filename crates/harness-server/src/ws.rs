@@ -470,10 +470,15 @@ impl ConnState {
             // Client context catalog: upsert on the bound session. No session
             // yet (announce before `session.start`) → warn + ignore: the
             // client re-announces after the handshake per the protocol order.
-            ClientMsg::ContextAnnounce { providers, .. } => match self.session_id.clone() {
+            ClientMsg::ContextAnnounce {
+                providers,
+                identity_keys,
+            } => match self.session_id.clone() {
                 Some(id) => {
                     let session = self.sessions.get(id).await;
-                    session.write().await.context = ClientCatalog::from_announce(providers);
+                    let mut session = session.write().await;
+                    session.context = ClientCatalog::from_announce(providers);
+                    session.identity_keys = identity_keys;
                 }
                 None => {
                     tracing::warn!(

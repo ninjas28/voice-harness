@@ -1,5 +1,6 @@
 /target
 /config/voice-harness.toml
+/config/personal-context-identities.json
 /config/mcp-tokens.json
 .build/
 /.hermes/

@@ -23,6 +23,14 @@ pub struct Session {
     /// `context.announce` on the WS; cleared when a fresh `session.start`
     /// rebinding the id arrives.
     pub context: ClientCatalog,
+    /// Identity keys the client announced with its catalog (iCloud record
+    /// name, platform UUID, me-contact email — client-chosen precedence).
+    /// Empty = anonymous: the session never merges with another.
+    pub identity_keys: Vec<String>,
+    /// Whether a live WS connection is currently bound to this session.
+    /// Updated by ws.rs connect/disconnect; only ACTIVE sessions contribute
+    /// catalogs to a federation merge or receive routed tool calls.
+    pub active: bool,
 }
 
 impl Session {
@@ -31,6 +39,8 @@ impl Session {
             history: VecDeque::new(),
             device_id,
             context: ClientCatalog::default(),
+            identity_keys: Vec::new(),
+            active: false,
         }
     }
 }
@@ -102,6 +112,18 @@ mod tests {
         let mut h: VecDeque<ChatMessage> = vec![msg("user"), msg("assistant")].into();
         trim_history(&mut h, 8);
         assert_eq!(h.len(), 2);
+    }
+
+    #[test]
+    fn session_defaults_to_empty_identity_keys() {
+        let s = Session::default();
+        assert!(
+            s.identity_keys.is_empty(),
+            "a session without an announce has no identity keys"
+        );
+        assert!(Session::with_device(Some("dev-a".into()))
+            .identity_keys
+            .is_empty());
     }
 
     #[test]

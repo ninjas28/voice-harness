@@ -234,6 +234,9 @@ pub struct PersonalContextConfig {
     /// Server-side clamp on digest text length before it enters history.
     #[serde(default = "default_max_result_bytes")]
     pub max_result_bytes: usize,
+    /// Cross-device identity federation (shared catalogs + routing).
+    #[serde(default)]
+    pub federation: FederationConfig,
 }
 
 fn default_true() -> bool {
@@ -246,12 +249,43 @@ fn default_max_result_bytes() -> usize {
     8_192
 }
 
+/// `[personal_context.federation]`: cross-device grouping of personal-context
+/// catalogs by shared identity keys (iCloud record name, platform UUID,
+/// me-contact email). Sessions of the same canonical user merge their
+/// announced catalogs; `personal.*` calls route to a device that can serve
+/// them, with a bounded fallback to the next matching session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FederationConfig {
+    /// Master gate for merging/routing across sessions. Off = each session's
+    /// catalog stays its own (v1 behavior).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Where the key → canonical-user map persists. chmod 600, never commit
+    /// (see `.gitignore`).
+    #[serde(default = "default_registry_path")]
+    pub registry_path: String,
+}
+
+fn default_registry_path() -> String {
+    "config/personal-context-identities.json".to_string()
+}
+
+impl Default for FederationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            registry_path: default_registry_path(),
+        }
+    }
+}
+
 impl Default for PersonalContextConfig {
     fn default() -> Self {
         Self {
             enabled: default_true(),
             call_timeout_secs: default_call_timeout(),
             max_result_bytes: default_max_result_bytes(),
+            federation: FederationConfig::default(),
         }
     }
 }
@@ -789,6 +823,39 @@ allowed_origins = ["https://home.example.com"]
         assert_eq!(cfg.stt.realtime.path, "/v1/audio/transcriptions/realtime");
         assert_eq!(cfg.stt.realtime.endpointing_ms, 700);
         assert_eq!(cfg.stt.realtime.language, "");
+    }
+
+    #[test]
+    fn federation_defaults() {
+        let cfg = Config::load(None).expect("defaults load");
+        assert!(
+            cfg.personal_context.federation.enabled,
+            "federation defaults on"
+        );
+        assert_eq!(
+            cfg.personal_context.federation.registry_path,
+            "config/personal-context-identities.json"
+        );
+    }
+
+    #[test]
+    fn federation_parses_from_toml() {
+        let path = std::env::temp_dir().join(format!("vh-fed-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"
+[personal_context.federation]
+enabled = false
+registry_path = "/tmp/vh-identities.json"
+"#,
+        )
+        .expect("write temp config");
+        let cfg = Config::load(Some(&path)).expect("parses");
+        assert!(!cfg.personal_context.federation.enabled);
+        assert_eq!(
+            cfg.personal_context.federation.registry_path,
+            "/tmp/vh-identities.json"
+        );
     }
 
     #[test]
