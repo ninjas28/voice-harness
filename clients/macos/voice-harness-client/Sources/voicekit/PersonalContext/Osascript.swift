@@ -1,6 +1,9 @@
 import Foundation
 
+#if os(macOS)
 /// Bounded AppleScript execution through `/usr/bin/osascript`.
+/// macOS-only: `Process` does not exist in iOS Foundation (the iOS SDK does
+/// not export it), and AppleScript automation only exists on macOS anyway.
 ///
 /// Every run is bounded: the child gets a wall-clock limit (10 s default) and
 /// is killed via `terminate()` when it overruns, so a wedged `delay` can
@@ -94,3 +97,4 @@ public enum Osascript {
         }
     }
 }
+#endif
