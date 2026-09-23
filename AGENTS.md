@@ -203,6 +203,27 @@ need zero changes.
 - HTTP `POST /v1/turn` passes no result inbox: `personal.*` calls there error
   cleanly ("requires a connected client").
 
+### Identity federation (cross-device)
+
+- Clients send `identity_keys` with `context.announce` (optional; omitted when
+  empty — old clients unaffected). Keys, in precedence order: iCloud
+  `CKContainer.userRecordID` recordName (stable per Apple ID per container),
+  `IOPlatformUUID` (macOS-only, device-unique), me-contact email (weak,
+  macOS-only, only when Contacts already authorized — never prompts).
+- The server keeps a persisted key→canonical-user map
+  (`[personal_context.federation] registry_path`, default
+  `config/personal-context-identities.json`, chmod 600; a corrupt registry is
+  a startup error, not silently empty). Every announced key maps to the
+  canonical user — devices sharing ANY key federate.
+- Catalogs of active sessions sharing a canonical user are merged into the
+  LLM tool list (deduped by fq name; own catalog's definitions win). Routing
+  for `personal.*`: own session first, then sibling sessions (ascending
+  session id), capped at 3 attempts with the per-call timeout each; routed
+  results flow back through a pending-reply registry keyed by (session,
+  call_id). `Session.active` tracks connection liveness.
+- Trust boundary = server API-key auth. No data crosses CloudKit — identity
+  keys only. Family members sharing an Apple ID WILL merge (accepted).
+
 ## Client deployment (macOS)
 
 ```

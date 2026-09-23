@@ -82,7 +82,7 @@ JSON text frames with dotted `type` tags; audio is base64 PCM16, 16 kHz mono.
 | C→S | `session.start` | `device_id?`, `sample_rate?` (default 16000) |
 | C→S | `audio.data` | `pcm` (base64 PCM16); arbitrary framing is fine |
 | C→S | `speech.end` | optional; server-side VAD also endpointed |
-| C→S | `context.announce` | `providers`: client-side personal-context catalog (bare tool names); empty list clears it |
+| C→S | `context.announce` | `providers`: client-side personal-context catalog (bare tool names); optional `identity_keys` (device federation); empty providers list clears the catalog |
 | C→S | `tool.result` | `call_id`, `ok`, `text` digest for a prior `tool.call` |
 | C→S | `session.stop` | ends the session |
 | S→C | `state` | `listening` / `speech` / `thinking` / `speaking` |
@@ -111,6 +111,15 @@ themselves at session start, the LLM sees tools named
 the WebSocket. Configure `[personal_context]` in `voice-harness.toml`
 (`enabled`, `call_timeout_secs`, `max_result_bytes`); the HTTP surface cannot
 serve personal tools (no client connection to execute them).
+
+Clients also announce `identity_keys` (iCloud account record, Mac platform
+UUID, optionally me-contact email). Devices whose keys match — same Apple ID —
+are grouped into one canonical user on the server, their catalogs merge into
+the LLM tool list, and `personal.*` calls route to whichever device can serve
+them (own device first, then siblings, bounded attempts). No personal data
+crosses CloudKit — identity keys only; the registry lives server-side at
+`config/personal-context-identities.json` and the trust boundary is the
+server's API-key auth.
 
 ### Sentence-end gate
 
