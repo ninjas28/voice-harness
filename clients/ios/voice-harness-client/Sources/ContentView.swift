@@ -26,6 +26,16 @@ struct ContentView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                // Personal context: on = request calendar/contacts/photos
+                // access (the one deliberate TCC prompt) and announce the
+                // authorized tools to the server; off = announce an empty
+                // list, which clears the server-side catalog. No raw-stores
+                // row on iOS (that tier is macOS-only).
+                Toggle("Personal context (calendar, contacts, photos)",
+                       isOn: Binding(
+                           get: { runtime.personalContextEnabled },
+                           set: { runtime.setPersonalContextEnabled($0) }))
+                    .font(.caption)
                 if let err = runtime.errorMessage {
                     Text(err).foregroundStyle(.red).font(.caption)
                 }
