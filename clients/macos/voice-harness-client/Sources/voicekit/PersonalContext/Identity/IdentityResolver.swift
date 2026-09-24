@@ -36,10 +36,17 @@ public struct IdentityResolver: Sendable {
             ranked.append((rank, "\(provider.keyId):\(value)"))
         }
         var seen = Set<String>()
-        return ranked
+        var keys = ranked
             .sorted { $0.rank < $1.rank }
             .map(\.key)
             .filter { seen.insert($0).inserted }
+        // The manual bridge is announce-critical: append it synchronously so
+        // a session start right after the user types the key never races the
+        // background resolver (automatic probes are async; this read is not).
+        if let manual = ManualKeyProvider.announceKey(), !keys.contains(manual) {
+            keys.append(manual)
+        }
+        return keys
     }
 
     private typealias Ranked = (rank: Int, key: String)

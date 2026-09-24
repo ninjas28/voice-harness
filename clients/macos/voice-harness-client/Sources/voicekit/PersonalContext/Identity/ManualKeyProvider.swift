@@ -24,4 +24,14 @@ public struct ManualKeyProvider: IdentityProvider {
     public func currentKey() async -> String? {
         currentKeyValue
     }
+
+    /// The announce-ready key (`manual:<value>`), synchronously readable —
+    /// the manual bridge must never race a background resolver, because the
+    /// announce (which carries identity keys) happens right after
+    /// `session.start`. nil when unset.
+    public static func announceKey() -> String? {
+        let provider = ManualKeyProvider()
+        guard let value = provider.currentKeyValue else { return nil }
+        return "\(provider.keyId):\(value)"
+    }
 }

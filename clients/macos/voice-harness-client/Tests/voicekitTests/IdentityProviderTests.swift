@@ -127,6 +127,30 @@ final class IdentityProviderTests: XCTestCase {
         XCTAssertEqual(keys, ["platform_uuid:UUID-1", "manual:trevor-home"])
     }
 
+    /// Announce-critical (2026-09-23 federation regression): the manual key
+    /// must appear in `identityKeys()` even when the automatic providers are
+    /// still resolving (or never resolve) — a session start right after
+    /// typing the key cannot wait on a detached resolver task.
+    func testManualKeyPresentWhenAutomaticProvidersPending() async {
+        AppSettings.setManualIdentityKey("trevor-home")
+        // All-automatic provider unavailable (nil): the resolver would
+        // otherwise return [] and stay uncached, dropping the manual bridge.
+        let resolver = IdentityResolver(providers: [
+            StubIdentityProvider(keyId: "icloud", value: nil),
+            ManualKeyProvider(),
+        ])
+        let keys = await resolver.identityKeys()
+        XCTAssertEqual(keys, ["manual:trevor-home"])
+    }
+
+    /// The synchronous announce key matches the resolver's manual entry.
+    func testAnnounceKeyMatchesResolverOutput() async {
+        AppSettings.setManualIdentityKey("trevor-home")
+        XCTAssertEqual(ManualKeyProvider.announceKey(), "manual:trevor-home")
+        AppSettings.setManualIdentityKey(" ")
+        XCTAssertNil(ManualKeyProvider.announceKey(), "whitespace-only = unset")
+    }
+
     // MARK: - ICloudAccountId (injected fetch seam — no CloudKit here)
 
     func testICloudAccountIdReturnsInjectedRecordName() async {

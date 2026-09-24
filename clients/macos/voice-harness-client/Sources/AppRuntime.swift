@@ -186,18 +186,22 @@ final class AppRuntime: ObservableObject {
             errorMessage = "Can't reach harness server at \(serverURL.host ?? "?"): \(error.localizedDescription)"
             return
         }
-        // The announce covers the full installed catalog (raw providers are
-        // inside the server exactly when both toggles are on, and their
-        // descriptors appear only when their gates pass — verified at the
-        // toggle flip; probes here are quiet re-checks).
-        if AppSettings.personalContextEnabled, let server = client.personalContextServer {
-            do {
-                try await client.sendAnnounce(providers: await server.announceProviders(),
-                                              identityKeys: identityKeys)
-            } catch {
-                // Non-fatal: the session still works, just without personal
-                // tools until the next announce (toggle flip or reconnect).
+        // Identity federation must not depend on the personal-context toggle:
+        // announce unconditionally (keys always; the catalog is the
+        // authorized providers — empty when toggles are off, which the server
+        // treats as "no tools from here"). The manual bridge is read
+        // synchronously so a start right after typing the key never races
+        // the background resolver.
+        do {
+            var keys = identityKeys
+            if let manual = ManualKeyProvider.announceKey(), !keys.contains(manual) {
+                keys.append(manual)
             }
+            let providers = await client.personalContextServer?.announceProviders() ?? []
+            try await client.sendAnnounce(providers: providers, identityKeys: keys)
+        } catch {
+            // Non-fatal: the session still works, just without personal
+            // tools until the next announce (toggle flip or reconnect).
         }
         client.onChunk = { [weak player] base64, _ in
             player?.scheduleChunk(base64: base64)
