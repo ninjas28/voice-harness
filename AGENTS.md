@@ -210,6 +210,12 @@ need zero changes.
   `CKContainer.userRecordID` recordName (stable per Apple ID per container),
   `IOPlatformUUID` (macOS-only, device-unique), me-contact email (weak,
   macOS-only, only when Contacts already authorized — never prompts).
+- **CKContainer is a crash landmine on unentitled binaries**: without the
+  iCloud entitlement, `CKContainer.default()` throws an uncatchable ObjC
+  `CKException` and aborts. `ICloudAccountId` probes the entitlement first
+  (macOS: SecTask; iOS: embedded provisioning profile) and falls back to nil.
+  Unsigned/ad-hoc bundles therefore never produce the iCloud key — see the
+  signing step in "Client deployment".
 - The server keeps a persisted key→canonical-user map
   (`[personal_context.federation] registry_path`, default
   `config/personal-context-identities.json`, chmod 600; a corrupt registry is
@@ -236,6 +242,21 @@ open /Applications/VoiceHarnessClient.app
 
 The app is launchd-owned via `open`; bare background launches get reaped.
 Settings persist in the app's `UserDefaults` domain (`server_url`, `tts_rate`).
+
+For cross-device identity federation the bundle must be **signed with the
+iCloud entitlement** (unsigned builds fall back to weaker identity keys):
+
+```
+scripts/sign-macos-bundle.sh   # embeds profile + codesigns with Entitlements.plist
+```
+
+One-time prerequisite: generate the macOS provisioning profile for
+`com.zippystation.voice-harness-client` (iCloud capability, container
+`iCloud.wtf.geese.voice-harness`) in Xcode — requires being signed into the
+team's Apple ID — and save it as
+`clients/macos/voice-harness-client/VoiceHarnessClient.provisionprofile`.
+Without signing, `CKContainer.default()` would crash (guarded at runtime), so
+the client silently uses platform-UUID/me-email keys instead.
 
 ## Style
 
