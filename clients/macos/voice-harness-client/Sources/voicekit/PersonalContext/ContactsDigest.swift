@@ -21,7 +21,7 @@ enum ContactsDigestFormatter {
         return DigestFormatter.clamp(out)
     }
 
-    /// One contact line: "Sarah Nielsen — (415) 555-0132, sarah@…".
+    /// One contact line: "Robin Ashford — (415) 555-0132, robin@…".
     static func line(for contact: ContactModel) -> String {
         var details: [String] = []
         if let phone = contact.phone, !phone.isEmpty { details.append(phone) }

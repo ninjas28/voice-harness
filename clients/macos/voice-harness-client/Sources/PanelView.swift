@@ -115,7 +115,7 @@ struct PanelView: View {
             // Manual identity key: type the same value on every device to
             // group them into one person server-side (no signing needed).
             Text("Identity key (same on every device)").font(.caption).foregroundStyle(.secondary)
-            TextField("e.g. trevor-home", text: $manualKeyString)
+            TextField("e.g. our-home", text: $manualKeyString)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(saveIdentityKey)
             if let settingsError {

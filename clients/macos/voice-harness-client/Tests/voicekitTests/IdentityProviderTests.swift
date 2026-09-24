@@ -107,10 +107,10 @@ final class IdentityProviderTests: XCTestCase {
     // MARK: - ManualKeyProvider (user-set shared identity key)
 
     func testManualKeyProviderYieldsPersistedValue() {
-        AppSettings.setManualIdentityKey("trevor-home")
+        AppSettings.setManualIdentityKey("our-home")
         let provider = ManualKeyProvider()
         XCTAssertEqual(provider.keyId, "manual")
-        XCTAssertEqual(provider.currentKeyValue, "trevor-home")
+        XCTAssertEqual(provider.currentKeyValue, "our-home")
         AppSettings.setManualIdentityKey("")
         XCTAssertNil(ManualKeyProvider().currentKeyValue, "cleared setting = unavailable")
     }
@@ -118,13 +118,13 @@ final class IdentityProviderTests: XCTestCase {
     /// The manual key sorts AFTER the known automatic sources (unknown keyId
     /// rule) but still participates in dedupe and precedence output.
     func testManualKeySortsAfterAutomaticSources() async {
-        AppSettings.setManualIdentityKey("trevor-home")
+        AppSettings.setManualIdentityKey("our-home")
         let resolver = IdentityResolver(providers: [
             ManualKeyProvider(),
             StubIdentityProvider(keyId: "platform_uuid", value: "UUID-1"),
         ])
         let keys = await resolver.identityKeys()
-        XCTAssertEqual(keys, ["platform_uuid:UUID-1", "manual:trevor-home"])
+        XCTAssertEqual(keys, ["platform_uuid:UUID-1", "manual:our-home"])
     }
 
     /// Announce-critical (2026-09-23 federation regression): the manual key
@@ -132,7 +132,7 @@ final class IdentityProviderTests: XCTestCase {
     /// still resolving (or never resolve) — a session start right after
     /// typing the key cannot wait on a detached resolver task.
     func testManualKeyPresentWhenAutomaticProvidersPending() async {
-        AppSettings.setManualIdentityKey("trevor-home")
+        AppSettings.setManualIdentityKey("our-home")
         // All-automatic provider unavailable (nil): the resolver would
         // otherwise return [] and stay uncached, dropping the manual bridge.
         let resolver = IdentityResolver(providers: [
@@ -140,13 +140,13 @@ final class IdentityProviderTests: XCTestCase {
             ManualKeyProvider(),
         ])
         let keys = await resolver.identityKeys()
-        XCTAssertEqual(keys, ["manual:trevor-home"])
+        XCTAssertEqual(keys, ["manual:our-home"])
     }
 
     /// The synchronous announce key matches the resolver's manual entry.
     func testAnnounceKeyMatchesResolverOutput() async {
-        AppSettings.setManualIdentityKey("trevor-home")
-        XCTAssertEqual(ManualKeyProvider.announceKey(), "manual:trevor-home")
+        AppSettings.setManualIdentityKey("our-home")
+        XCTAssertEqual(ManualKeyProvider.announceKey(), "manual:our-home")
         AppSettings.setManualIdentityKey(" ")
         XCTAssertNil(ManualKeyProvider.announceKey(), "whitespace-only = unset")
     }

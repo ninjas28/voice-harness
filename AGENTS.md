@@ -250,13 +250,14 @@ iCloud entitlement** (unsigned builds fall back to weaker identity keys):
 scripts/sign-macos-bundle.sh   # embeds profile + codesigns with Entitlements.plist
 ```
 
-One-time prerequisite: generate the macOS provisioning profile for
-`com.zippystation.voice-harness-client` (iCloud capability, container
-`iCloud.wtf.geese.voice-harness`) in Xcode — requires being signed into the
-team's Apple ID — and save it as
+One-time prerequisite: generate the macOS provisioning profile for the app's
+bundle id (iCloud capability, a container id pinned identically on both apps)
+in Xcode — requires being signed into the team's Apple ID — and save it as
 `clients/macos/voice-harness-client/VoiceHarnessClient.provisionprofile`.
+All deployment-specific values (signing identity, team id, bundle id,
+container id) are passed via `VH_*` environment variables, never committed.
 Without signing, `CKContainer.default()` would crash (guarded at runtime), so
-the client silently uses platform-UUID/me-email keys instead.
+the client silently uses platform-UUID/manual-key identities instead.
 
 ## Style
 

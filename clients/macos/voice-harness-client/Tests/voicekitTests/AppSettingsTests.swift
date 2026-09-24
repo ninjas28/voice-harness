@@ -89,7 +89,7 @@ final class AppSettingsTests: XCTestCase {
 
     func testSanitizeRejectsPublicCleartextWS() {
         XCTAssertNil(
-            AppSettings.sanitizeServerURLString("ws://voicebox.zippystation.com/v1/realtime"))
+            AppSettings.sanitizeServerURLString("ws://assistant.example.com/v1/realtime"))
         XCTAssertNil(AppSettings.sanitizeServerURLString("ws://example.com/v1/realtime"))
         XCTAssertNil(AppSettings.sanitizeServerURLString("ws://8.8.8.8:8090/v1/realtime"))
         // RFC1918 boundaries: 172.32.0.0/12-adjacent addresses are public.
@@ -101,8 +101,8 @@ final class AppSettingsTests: XCTestCase {
 
     func testSanitizeAcceptsWssAnyHost() {
         XCTAssertEqual(
-            AppSettings.sanitizeServerURLString("wss://voicebox.zippystation.com/v1/realtime"),
-            "wss://voicebox.zippystation.com/v1/realtime")
+            AppSettings.sanitizeServerURLString("wss://assistant.example.com/v1/realtime"),
+            "wss://assistant.example.com/v1/realtime")
     }
 
     func testSanitizePreservesTokenQueryRoundTrip() {

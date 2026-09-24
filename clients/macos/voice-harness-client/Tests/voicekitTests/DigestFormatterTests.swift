@@ -84,12 +84,12 @@ final class DigestFormatterTests: XCTestCase {
         // provider-level case-insensitive substring match is exercised in
         // testContactsFormatterModelLineShape (model→line) plus provider docs.
         let contacts = [
-            ContactModel(name: "Sarah Nielsen", phone: "mobile (415) 555-0132", email: "sarah@nielsen.example"),
-            ContactModel(name: "Morgan Nielsen", phone: nil, email: nil),
+            ContactModel(name: "Robin Ashford", phone: "mobile (415) 555-0132", email: "robin@ashford.example"),
+            ContactModel(name: "Quinn Ashford", phone: nil, email: nil),
         ]
         let digest = ContactsDigestFormatter.digest(for: "mom", matches: contacts)
-        XCTAssertTrue(digest.contains("Sarah Nielsen — mobile (415) 555-0132"), "digest was: \(digest)")
-        XCTAssertTrue(digest.contains("Morgan Nielsen"), "digest was: \(digest)")
+        XCTAssertTrue(digest.contains("Robin Ashford — mobile (415) 555-0132"), "digest was: \(digest)")
+        XCTAssertTrue(digest.contains("Quinn Ashford"), "digest was: \(digest)")
     }
 
     func testContactsDigestSaysNotFound() {
@@ -99,10 +99,10 @@ final class DigestFormatterTests: XCTestCase {
 
     func testContactsFormatterModelLineShape() {
         // Model → line: name + phone + email joined with commas after an em dash.
-        XCTAssertEqual(ContactsDigestFormatter.line(for: ContactModel(name: "Sarah Nielsen",
+        XCTAssertEqual(ContactsDigestFormatter.line(for: ContactModel(name: "Robin Ashford",
                                                                      phone: "(415) 555-0132",
-                                                                     email: "sarah@nielsen.example")),
-                       "Sarah Nielsen — (415) 555-0132, sarah@nielsen.example")
+                                                                     email: "robin@ashford.example")),
+                       "Robin Ashford — (415) 555-0132, robin@ashford.example")
         XCTAssertEqual(ContactsDigestFormatter.line(for: ContactModel(name: "Solo", phone: nil, email: nil)),
                        "Solo")
     }

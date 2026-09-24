@@ -9,7 +9,7 @@ import Foundation
 public enum AutoStartRequest {
     /// The app-group ID must match the app target and the widget extension
     /// (same entitlements on both) — one source of truth.
-    public static let appGroupID = "group.wtf.geese.voice-harness"
+    public static let appGroupID = "group.com.voiceharness.harness"
 
     static let flagKey = "autostart_requested"
 

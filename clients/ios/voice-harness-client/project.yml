@@ -1,6 +1,6 @@
 name: VoiceHarnessApp
 options:
-  bundleIdPrefix: wtf.geese
+  bundleIdPrefix: com.voiceharness
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
@@ -34,28 +34,26 @@ targets:
     settings:
       base:
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: APP
-        # iCloud identity federation (Task 2): the two CloudKit keys ONLY (no
-        # kvstore) live in entitlements/VoiceHarness.entitlements — the plist
+        # iCloud identity federation: the CloudKit keys (two only, no kvstore)
+        # would live in entitlements/VoiceHarness.entitlements — the plist
         # is referenced directly via build setting because xcodegen's
         # `entitlements:` attribute has been observed to REGENERATE the file
         # from an empty spec on `xcodegen generate`, clobbering hand-written
-        # keys. The plist is intentionally EMPTY (dict): free personal
-        # development teams cannot use the iCloud/CloudKit capability, so
-        # entitlement-bearing builds fail to sign. Cross-device identity
-        # federation uses the MANUAL identity key instead (same value typed
-        # into each app's settings — ManualKeyProvider / AppSettings
-        # .manualIdentityKey). If a paid team is configured later, add
-        # com.apple.developer.icloud-container-identifiers =
-        # [iCloud.wtf.geese.voice-harness] + icloud-services = [CloudKit]
-        # here and on the macOS bundle (scripts/sign-macos-bundle.sh).
+        # keys. The plist is intentionally EMPTY (dict): iCloud/CloudKit
+        # entitlements require a paid developer team, so entitlement-bearing
+        # builds fail to sign on free teams. Cross-device identity federation
+        # uses the MANUAL identity key instead (same value typed into each
+        # app's settings — ManualKeyProvider / AppSettings.manualIdentityKey).
+        # If a paid team is configured later, add
+        # com.apple.developer.icloud-container-identifiers = [<container-id>]
+        # + icloud-services = [CloudKit] here and on the macOS bundle
+        # (scripts/sign-macos-bundle.sh takes the container id via env).
         CODE_SIGN_ENTITLEMENTS: entitlements/VoiceHarness.entitlements
-        # Automatic signing under the PERSONAL team (8PP6TB4652 — the only
-        # Apple ID signed into Xcode; the paid-team cert 73F57295L8 has no
-        # account session, so device builds fail with 'No Account for Team').
-        # Personal teams support app-id registration + device profiles; they
-        # do NOT support the iCloud capability (see the note above).
+        # Automatic signing team is injected at generate time (never committed):
+        #   VH_TEAM_ID=XXXXXXXXXX xcodegen generate
+        # (xcodegen substitutes ${VH_TEAM_ID} from the environment).
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: 8PP6TB4652
+        DEVELOPMENT_TEAM: ${VH_TEAM_ID}
     info:
       path: Info.plist
       properties:
@@ -83,15 +81,16 @@ targets:
         product: voicekit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: wtf.geese.VoiceHarnessApp.Controls
+        PRODUCT_BUNDLE_IDENTIFIER: com.voiceharness.VoiceHarnessApp.Controls
         # The app embeds this extension; a device build signs both, so the
         # extension carries the same automatic-signing settings (Task 2).
         # Same entitlements plist as the app (build-setting reference — see
         # the app target's note on why not `entitlements:`).
         CODE_SIGN_ENTITLEMENTS: entitlements/VoiceHarness.entitlements
-        # Same personal team as the app target (device builds sign both).
+        # Same injected team as the app target (device builds sign both):
+        #   VH_TEAM_ID=XXXXXXXXXX xcodegen generate
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: 8PP6TB4652
+        DEVELOPMENT_TEAM: ${VH_TEAM_ID}
     info:
       path: widgets/Info.plist
       properties:
