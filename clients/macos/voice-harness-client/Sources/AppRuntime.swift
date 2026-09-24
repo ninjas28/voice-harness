@@ -63,14 +63,39 @@ final class AppRuntime: ObservableObject {
     @Published private(set) var identityKeys: [String] = AppSettings.identityKeys
 
     /// Test seam: builds the production resolver (icloud > platform_uuid >
-    /// me_email). Tests replace it with stub providers. Unsafe-annotated like
-    /// `AppSettings.defaults` — replaced only from test setup, read at start.
+    /// me_email > manual). Tests replace it with stub providers.
+    /// Unsafe-annotated like `AppSettings.defaults` — replaced only from test
+    /// setup, read at start.
     nonisolated(unsafe) static var identityResolverFactory: () -> IdentityResolver = {
         IdentityResolver(providers: [
             ICloudAccountId(),
             PlatformUUIDProvider(),
             MeEmailProvider(),
+            ManualKeyProvider(),
         ])
+    }
+
+    /// Commits the manual identity key (cross-device bridge): persists it,
+    /// invalidates the key cache, and re-announces on the live session so the
+    /// server regroups immediately (no reconnect needed). Empty clears the
+    /// key — the next announce simply omits it.
+    func setManualIdentityKey(_ value: String) {
+        AppSettings.setManualIdentityKey(value)
+        AppSettings.setIdentityKeys([]) // force re-resolve on next start
+        identityKeys = AppSettings.identityKeys
+        if let client {
+            Task { [weak self] in
+                guard let self else { return }
+                // Re-resolve synchronously (manual key reads settings; the
+                // automatic providers are cheap probes) and announce.
+                let keys = await Self.identityResolverFactory().identityKeys()
+                AppSettings.setIdentityKeys(keys)
+                self.identityKeys = keys
+                let descriptors = await self.personalContextServer?.announceProviders() ?? []
+                try? await client.sendAnnounce(providers: descriptors,
+                                               identityKeys: keys)
+            }
+        }
     }
 
     private init() {

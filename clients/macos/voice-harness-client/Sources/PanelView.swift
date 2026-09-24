@@ -5,6 +5,8 @@ struct PanelView: View {
     @ObservedObject var runtime: AppRuntime
     @State private var showSettings = false
     @State private var settingsError: String?
+    /// Editable manual identity key (cross-device bridge); committed on Save.
+    @State private var manualKeyString = AppSettings.manualIdentityKey
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -110,6 +112,12 @@ struct PanelView: View {
             Text("Reads Messages, Mail, and Notes data on this Mac. Requires Full Disk Access and Automation permission.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            // Manual identity key: type the same value on every device to
+            // group them into one person server-side (no signing needed).
+            Text("Identity key (same on every device)").font(.caption).foregroundStyle(.secondary)
+            TextField("e.g. trevor-home", text: $manualKeyString)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(saveIdentityKey)
             if let settingsError {
                 Text(settingsError).font(.caption).foregroundStyle(.red)
             }
@@ -137,8 +145,14 @@ struct PanelView: View {
             settingsError = error
         } else {
             settingsError = nil
+            saveIdentityKey()
             showSettings = false
         }
+    }
+
+    /// Commits the manual identity key field (re-announces when changed).
+    private func saveIdentityKey() {
+        runtime.setManualIdentityKey(manualKeyString)
     }
 
     /// Assistant-row state. Dots run whenever the model is under `thinking`;

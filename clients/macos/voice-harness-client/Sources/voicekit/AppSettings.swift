@@ -171,6 +171,28 @@ public enum AppSettings {
 
     // MARK: - Identity keys cache (federation, plan 2026-09-21_235410)
 
+    /// User-set shared identity key (manual identity bridge): type the same
+    /// value into every device's panel to group them into one canonical user
+    /// server-side. Empty = unset. Works without any entitlements/signing —
+    /// the fallback when the iCloud path is unavailable (free personal teams
+    /// cannot use the CloudKit capability).
+    public static let manualIdentityKeyKey = "manual_identity_key"
+
+    public static var manualIdentityKey: String {
+        defaults.string(forKey: manualIdentityKeyKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    public static func setManualIdentityKey(_ value: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            defaults.removeObject(forKey: manualIdentityKeyKey)
+        } else {
+            defaults.set(trimmed, forKey: manualIdentityKeyKey)
+        }
+    }
+
+
     /// Cached identity keys (`<keyId>:<value>` strings) computed once at
     /// runtime start by the detached `IdentityResolver` task. Cached so
     /// repeated starts don't re-probe CloudKit/IOKit/Contacts; an empty

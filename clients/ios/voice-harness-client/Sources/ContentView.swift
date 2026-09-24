@@ -5,6 +5,8 @@ struct ContentView: View {
     @ObservedObject var runtime: AppRuntime
     @State private var showSettings = false
     @State private var settingsError: String?
+    /// Editable manual identity key (cross-device bridge); committed on Save.
+    @State private var manualKeyString = AppSettings.manualIdentityKey
 
     var body: some View {
         NavigationStack {
@@ -104,6 +106,13 @@ struct ContentView: View {
                         Text("Saving stops the session").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
+                Section("Identity key (cross-device)") {
+                    TextField("same value on every device", text: $manualKeyString)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    Text("Devices sharing this key share personal context (calendar, contacts, photos, and this Mac's messages). No account needed.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -116,6 +125,7 @@ struct ContentView: View {
             settingsError = error
         } else {
             settingsError = nil
+            runtime.setManualIdentityKey(manualKeyString)
             showSettings = false
         }
     }

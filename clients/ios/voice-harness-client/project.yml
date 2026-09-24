@@ -39,18 +39,23 @@ targets:
         # is referenced directly via build setting because xcodegen's
         # `entitlements:` attribute has been observed to REGENERATE the file
         # from an empty spec on `xcodegen generate`, clobbering hand-written
-        # keys. Content: com.apple.developer.icloud-container-identifiers =
-        # [iCloud.wtf.geese.voice-harness], com.apple.developer.icloud-services
-        # = [CloudKit]. Used ONLY to read CKContainer.userRecordID() (identity
-        # federation); no data crosses CloudKit. The container id is pinned
-        # identically on both apps so recordNames match across devices.
+        # keys. The plist is intentionally EMPTY (dict): free personal
+        # development teams cannot use the iCloud/CloudKit capability, so
+        # entitlement-bearing builds fail to sign. Cross-device identity
+        # federation uses the MANUAL identity key instead (same value typed
+        # into each app's settings — ManualKeyProvider / AppSettings
+        # .manualIdentityKey). If a paid team is configured later, add
+        # com.apple.developer.icloud-container-identifiers =
+        # [iCloud.wtf.geese.voice-harness] + icloud-services = [CloudKit]
+        # here and on the macOS bundle (scripts/sign-macos-bundle.sh).
         CODE_SIGN_ENTITLEMENTS: entitlements/VoiceHarness.entitlements
-        # iCloud identity federation (Task 2): automatic signing under the
-        # personal team registers the app id + iCloud container
-        # (iCloud.wtf.geese.voice-harness) — first device build may need
-        # Xcode/xcodebuild -allowProvisioningUpdates to complete registration.
+        # Automatic signing under the PERSONAL team (8PP6TB4652 — the only
+        # Apple ID signed into Xcode; the paid-team cert 73F57295L8 has no
+        # account session, so device builds fail with 'No Account for Team').
+        # Personal teams support app-id registration + device profiles; they
+        # do NOT support the iCloud capability (see the note above).
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: 73F57295L8
+        DEVELOPMENT_TEAM: 8PP6TB4652
     info:
       path: Info.plist
       properties:
@@ -84,8 +89,9 @@ targets:
         # Same entitlements plist as the app (build-setting reference — see
         # the app target's note on why not `entitlements:`).
         CODE_SIGN_ENTITLEMENTS: entitlements/VoiceHarness.entitlements
+        # Same personal team as the app target (device builds sign both).
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: 73F57295L8
+        DEVELOPMENT_TEAM: 8PP6TB4652
     info:
       path: widgets/Info.plist
       properties:

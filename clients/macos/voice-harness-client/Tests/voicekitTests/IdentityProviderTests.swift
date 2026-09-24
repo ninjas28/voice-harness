@@ -6,6 +6,22 @@ import XCTest
 /// Contacts real paths are compile-verified, never executed here (no
 /// network, no TCC prompts from tests).
 final class IdentityProviderTests: XCTestCase {
+    /// Scratch defaults domain: manual-key tests persist through AppSettings,
+    /// which must never touch the app's real settings from tests.
+    private let suiteName = "voicekit.IdentityProviderTests"
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        defaults = UserDefaults(suiteName: suiteName)
+        defaults.removePersistentDomain(forName: suiteName)
+        AppSettings.defaults = defaults
+    }
+
+    override func tearDown() {
+        AppSettings.defaults = .standard
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
     /// Stub identity provider: fixed key tag + value (nil = unavailable).
     private struct StubIdentityProvider: IdentityProvider {
         let keyId: String
@@ -86,6 +102,29 @@ final class IdentityProviderTests: XCTestCase {
     func testNoProvidersYieldsEmpty() async {
         let empty = await IdentityResolver(providers: []).identityKeys()
         XCTAssertEqual(empty, [])
+    }
+
+    // MARK: - ManualKeyProvider (user-set shared identity key)
+
+    func testManualKeyProviderYieldsPersistedValue() {
+        AppSettings.setManualIdentityKey("trevor-home")
+        let provider = ManualKeyProvider()
+        XCTAssertEqual(provider.keyId, "manual")
+        XCTAssertEqual(provider.currentKeyValue, "trevor-home")
+        AppSettings.setManualIdentityKey("")
+        XCTAssertNil(ManualKeyProvider().currentKeyValue, "cleared setting = unavailable")
+    }
+
+    /// The manual key sorts AFTER the known automatic sources (unknown keyId
+    /// rule) but still participates in dedupe and precedence output.
+    func testManualKeySortsAfterAutomaticSources() async {
+        AppSettings.setManualIdentityKey("trevor-home")
+        let resolver = IdentityResolver(providers: [
+            ManualKeyProvider(),
+            StubIdentityProvider(keyId: "platform_uuid", value: "UUID-1"),
+        ])
+        let keys = await resolver.identityKeys()
+        XCTAssertEqual(keys, ["platform_uuid:UUID-1", "manual:trevor-home"])
     }
 
     // MARK: - ICloudAccountId (injected fetch seam — no CloudKit here)
