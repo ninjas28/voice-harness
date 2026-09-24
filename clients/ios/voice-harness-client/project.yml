@@ -4,6 +4,14 @@ options:
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
+# The entitlements plist is listed here so xcodegen tracks it as a project
+# file (visible in Xcode). NOTE: the entitlements CONTENT must be hand-edited
+# in the plist — xcodegen does not generate entitlements content, and the
+# targets reference the plist via CODE_SIGN_ENTITLEMENTS build settings (NOT
+# the `entitlements:` attribute, which was observed to regenerate the file
+# from an empty spec on `xcodegen generate`, clobbering the CloudKit keys).
+fileGroups:
+  - entitlements/VoiceHarness.entitlements
 packages:
   VoiceKit:
     path: ../../macos/voice-harness-client
@@ -23,11 +31,26 @@ targets:
         product: voicekit
       - target: VoiceHarnessWidgets
         embed: true
-    entitlements:
-      path: entitlements/VoiceHarness.entitlements
     settings:
       base:
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: APP
+        # iCloud identity federation (Task 2): the two CloudKit keys ONLY (no
+        # kvstore) live in entitlements/VoiceHarness.entitlements — the plist
+        # is referenced directly via build setting because xcodegen's
+        # `entitlements:` attribute has been observed to REGENERATE the file
+        # from an empty spec on `xcodegen generate`, clobbering hand-written
+        # keys. Content: com.apple.developer.icloud-container-identifiers =
+        # [iCloud.wtf.geese.voice-harness], com.apple.developer.icloud-services
+        # = [CloudKit]. Used ONLY to read CKContainer.userRecordID() (identity
+        # federation); no data crosses CloudKit. The container id is pinned
+        # identically on both apps so recordNames match across devices.
+        CODE_SIGN_ENTITLEMENTS: entitlements/VoiceHarness.entitlements
+        # iCloud identity federation (Task 2): automatic signing under the
+        # personal team registers the app id + iCloud container
+        # (iCloud.wtf.geese.voice-harness) — first device build may need
+        # Xcode/xcodebuild -allowProvisioningUpdates to complete registration.
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 73F57295L8
     info:
       path: Info.plist
       properties:
@@ -53,11 +76,16 @@ targets:
     dependencies:
       - package: VoiceKit
         product: voicekit
-    entitlements:
-      path: entitlements/VoiceHarness.entitlements
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: wtf.geese.VoiceHarnessApp.Controls
+        # The app embeds this extension; a device build signs both, so the
+        # extension carries the same automatic-signing settings (Task 2).
+        # Same entitlements plist as the app (build-setting reference — see
+        # the app target's note on why not `entitlements:`).
+        CODE_SIGN_ENTITLEMENTS: entitlements/VoiceHarness.entitlements
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 73F57295L8
     info:
       path: widgets/Info.plist
       properties:
