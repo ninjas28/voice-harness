@@ -25,6 +25,12 @@ public struct ICloudAccountId: IdentityProvider {
 
     private static func makeDefaultFetch() -> @Sendable () async -> String? {
         {
+            // Guard the ObjC-exception landmine first: without the iCloud
+            // entitlement, CKContainer.default() throws an uncatchable
+            // CKException and aborts the process (the 2026-09-23 Start
+            // crash). Entitlement-less binaries (unsigned bundles, the
+            // voicekitTests host) fall back silently instead.
+            guard SecEntitlementProbe.hasICloudContainerEntitlement() else { return nil }
             do {
                 let recordID = try await CKContainer.default().userRecordID()
                 let recordName = recordID.recordName
